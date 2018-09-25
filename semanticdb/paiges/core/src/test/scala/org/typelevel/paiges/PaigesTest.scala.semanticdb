@@ -1,0 +1,4223 @@
+
+ìﬂ@paiges/core/src/test/scala/org/typelevel/paiges/PaigesTest.scalaËÜpackage org.typelevel.paiges
+
+import org.scalatest.FunSuite
+import org.scalatest.prop.PropertyChecks._
+import org.scalacheck.Gen
+import scala.util.Random
+
+object PaigesTest {
+  implicit val docEquiv: Equiv[Doc] =
+    new Equiv[Doc] {
+      def equiv(x: Doc, y: Doc): Boolean = {
+        val maxWidth = Integer.max(x.maxWidth, y.maxWidth)
+        def randomWidth(): Int = Random.nextInt(maxWidth)
+        val widths =
+          if (maxWidth == 0) 0 :: Nil
+          else 0 :: randomWidth() :: randomWidth() :: Nil
+        Doc.equivAtWidths(widths).equiv(x, y)
+      }
+    }
+
+  implicit class EquivSyntax(lhs: Doc) {
+    def ===(rhs: Doc): Boolean = docEquiv.equiv(lhs, rhs)
+  }
+}
+
+class PaigesTest extends FunSuite {
+  import Generators._
+  import Doc.text
+  import PaigesTest._
+
+  implicit val generatorDrivenConfig =
+    PropertyCheckConfiguration(minSuccessful = 500)
+
+  test("basic test") {
+     assert((text("hello") + text("world")).render(100) == "helloworld")
+  }
+
+  test("nested test") {
+    assert((text("yo") + (text("yo\nho\nho").nested(2))).render(100) ==
+"""yoyo
+  ho
+  ho""")
+  }
+
+  test("paper example") {
+    val g = (((text("hello") :/ "a").grouped :/ "b").grouped :/ "c").grouped
+    assert(g.render(5) ==
+"""hello
+a
+b
+c""")
+    assert(g.render(11) == "hello a b c")
+  }
+
+  test("nesteding with paragraph") {
+    val words = List("this", "is", "a", "test", "of", "a", "block", "of", "text")
+    val d1 = Doc.paragraph(words.mkString(" "))
+    val d2 = d1 + (Doc.line :+ "love, Oscar").nested(2)
+    assert(d2.render(0) == words.mkString("", "\n", "\n  love, Oscar"))
+    assert(d2.render(100) == words.mkString("", " ", "\n  love, Oscar"))
+  }
+
+
+  test("test paragraph") {
+    val p = Doc.paragraph("This  is      some crazy\n text that should       loook super normal\n\n after we get rid of      the spaces")
+    assert(p.render(10) == """This is
+some crazy
+text that
+should
+loook
+super
+normal
+after we
+get rid of
+the spaces""")
+  }
+
+  test("(x = y) -> (x.## = y.##)") {
+    forAll { (a: Doc, b: Doc) =>
+      assert(a.## == a.##)
+      assert(b.## == b.##)
+      if (a == b) assert(a.## == b.##) else succeed
+    }
+  }
+
+  test("concat is associative") {
+    forAll { (a: Doc, b: Doc, c: Doc) =>
+      assert(((a + b) + c) === (a + (b + c)))
+    }
+  }
+
+  test("line is associative") {
+    forAll { (a: Doc, b: Doc, c: Doc) =>
+      assert(a.line(b).line(c) === a.line(b.line(c)))
+    }
+  }
+
+  test("lineOrSpace is associative") {
+    forAll { (a: Doc, b: Doc, c: Doc) =>
+      assert(a.lineOrSpace(b).lineOrSpace(c) === a.lineOrSpace(b.lineOrSpace(c)))
+    }
+  }
+
+  test("writeTo works") {
+    import java.io._
+    forAll { (doc: Doc, w: Int) =>
+      val baos = new ByteArrayOutputStream()
+      val pw = new PrintWriter(baos)
+      doc.writeTo(w, pw)
+      pw.close()
+      val s1 = baos.toString("UTF-8")
+      val s2 = doc.render(w)
+      assert(s1 == s2)
+    }
+  }
+
+  test("writeToTrim works") {
+    import java.io._
+    forAll { (doc: Doc, w: Int) =>
+      val baos = new ByteArrayOutputStream()
+      val pw = new PrintWriter(baos)
+      doc.writeToTrim(w, pw)
+      pw.close()
+      val s1 = baos.toString("UTF-8")
+      val s2 = doc.renderTrim(w)
+      assert(s1 == s2)
+    }
+  }
+
+  test("empty does not change things") {
+    forAll { (a: Doc) =>
+      assert((a + Doc.empty) === a)
+      assert((Doc.empty + a) === a)
+    }
+  }
+
+  test("spaces(n) == text(\" \") * n == text(\" \" * n)") {
+    forAll(Gen.choose(-10, 1000)) { n =>
+      val sn = Doc.spaces(n)
+      val tn = Doc.text(" ") * n
+      val un = Doc.text(" " * n)
+
+      assert(sn === tn)
+      assert(tn === un)
+    }
+  }
+
+  test("Doc.split(s, \" \", space).render(w) = s") {
+    forAll { (s: String, w: Int) =>
+      assert(Doc.split(s, " ".r, Doc.space).render(w) == s)
+    }
+  }
+
+  test("splitting x on x gives x") {
+    forAll(Gen.frequency((10, Gen.identifier), (1, Gen.const(" "))), Gen.choose(0, 100)) { (s, w) =>
+      assert(Doc.split(s, s.r, Doc.text(s)).render(w) == s)
+    }
+  }
+
+  def slowRenderTrim(d: Doc, width: Int): String = {
+    val parts = d.render(width).split("\n", -1).toList
+    parts match {
+      case Nil => sys.error("unreachable")
+      case other =>
+        other.map { str =>
+          str.reverse.dropWhile(_ == ' ').reverse
+        }
+        .mkString("\n")
+    }
+  }
+
+  test("dangling space 1") {
+    val d = Doc.stack(
+      List(
+        Doc.text("a"),
+        Doc.text("b"),
+        Doc.empty
+      )
+    ).nested(2)
+    val expected = "a\n  b\n"
+    assert(d.renderTrim(100) == expected)
+    assert(d.renderTrim(100) == slowRenderTrim(d, 100))
+    assert(d.renderStreamTrim(100).mkString == expected)
+  }
+
+  test("dangling space 2") {
+    val d = Doc.stack(
+      List(
+        Doc.empty,
+        Doc.text("a"),
+        Doc.empty,
+        Doc.empty,
+        Doc.text("b")
+      )
+    ).nested(2)
+    val expected = "\n  a\n\n\n  b"
+    assert(d.renderTrim(100) == expected)
+    assert(d.renderTrim(100) == slowRenderTrim(d, 100))
+    assert(d.renderStreamTrim(100).mkString == expected)
+  }
+
+  test("renderTrim trims a single line") {
+    import Doc._
+    val d = Text("a   ")
+    val expected = "a"
+    assert(d.renderTrim(100) == expected)
+    assert(d.renderTrim(100) == slowRenderTrim(d, 100))
+    assert(d.renderStreamTrim(100).mkString == expected)
+  }
+
+  test("renderStreamTrim and renderTrim are consistent") {
+    forAll { (d: Doc, width0: Int) =>
+      val width = width0 & 0xFFF
+      assert(d.renderStreamTrim(width).mkString == d.renderTrim(width),
+        s"input=${d.representation().render(100)}")
+    }
+  }
+
+  test("trim-law: renderTrim is what we expect") {
+    forAll { (d: Doc) =>
+      val trim = d.renderTrim(100)
+      val slowTrim = slowRenderTrim(d, 100)
+      assert(trim == slowTrim, s"input=${d.representation().render(100)}")
+    }
+  }
+
+  test("(a /: b)  works as expected") {
+    forAll { (a: String, b: String) =>
+      assert((a /: Doc.text(b)).render(0) == s"$a\n$b")
+    }
+  }
+
+  test("space works as expected") {
+    forAll { (a: String, b: String) =>
+      val res = s"$a $b"
+      assert((text(a) space b).render(0) == res)
+      assert((text(a) & text(b)).render(0) == res)
+      assert((text(a) :& b).render(0) == res)
+      assert((a &: text(b)).render(0) == res)
+    }
+  }
+
+  test("isEmpty == render(w).isEmpty for all w") {
+    forAll { (d: Doc) =>
+      if (d.isEmpty) {
+        assert((0 to d.maxWidth).forall(d.render(_).isEmpty), s"${d.representation(true).render(50)} has nonEmpty renderings")
+      }
+      else succeed
+    }
+  }
+  test("nonEmpty == !isEmpty") {
+    forAll { (d: Doc) =>
+      assert(d.nonEmpty == !d.isEmpty)
+    }
+  }
+  test("isEmpty compare empty == 0") {
+    forAll { (d: Doc) =>
+      if (d.isEmpty) assert(d === Doc.empty)
+      else succeed
+    }
+  }
+  test("renders are constant after maxWidth") {
+    forAll { (d: Doc, ws: List[Int]) =>
+      val m = d.maxWidth
+      val maxR = d.render(m)
+      val justAfter = (1 to 20).iterator
+      val goodW = (justAfter ++ ws.iterator).map { w => (m + w) max m }
+      assert(goodW.forall { w => d.render(w) == maxR })
+    }
+  }
+
+  test("render(w) == render(0) for w <= 0") {
+    forAll { (a: Doc, w: Int) =>
+      val wNeg = if (w > 0) -w else w
+      assert(a.render(wNeg) == a.render(0), s"${a.representation(true).render(40)}.render($wNeg) fails")
+    }
+  }
+
+  test("hard union cases") {
+    /**
+     * if s == space, and n == line
+     * we know that:
+     * a * (s|n) * b * (s|n) * c =
+     *
+     * (a * s * ((b * s * c) | (b * n * c)) |
+     *   (a * n * (b * s * c) | (b * n * c))
+     */
+    val first = Doc.paragraph("a b c")
+    val second = Doc.fill(Doc.lineOrSpace, List("a", "b", "c").map(Doc.text))
+    /*
+     * I think this fails perhaps because of the way fill constructs
+     * Unions. It violates a stronger invariant that Union(a, b)
+     * means a == flatten(b). It has the property that flatten(a) == flatten(b)
+     * but that is weaker. Our current comparison algorithm seems
+     * to leverage this fact
+     */
+    assert(first === second)
+
+    /**
+     * lineOrSpace == (s | n)
+     * flatten(lineOrSpace) = s
+     * group(lineOrSpace) = (s | (s|n)) == (s | n)
+     */
+    assert(Doc.lineOrSpace.grouped === Doc.lineOrSpace)
+  }
+  test("group law") {
+    /**
+     * group(x) = (x' | x) where x' is flatten(x)
+     *
+     * (a | b)*c == (a*c | b*c) so, if flatten(c) == c we have:
+     * c * (a | b) == (a*c | b*c)
+     *
+     * b.grouped + flatten(c) == (b + flatten(c)).grouped
+     * flatten(c) + b.grouped == (flatten(c) + b).grouped
+     */
+    forAll { (b: Doc, c: Doc) =>
+      val flatC = c.flatten
+      val left = (b.grouped + flatC)
+      val right = (b + flatC).grouped
+      assert(left === right)
+      assert((flatC + b.grouped) === (flatC + b).grouped)
+      // since left == right, we could have used those instead of b:
+      assert((left.grouped + flatC) === (right + flatC).grouped)
+    }
+  }
+  test("flatten(group(a)) == flatten(a)") {
+    forAll { (a: Doc) =>
+      assert(a.grouped.flatten === a.flatten)
+    }
+  }
+  test("a.flatten == a.flatten.flatten") {
+    forAll { (a: Doc) =>
+      val aflat = a.flatten
+      assert(aflat === aflat.flatten)
+    }
+  }
+  test("a.flatten == a.flattenOption.getOrElse(a)") {
+    forAll { (a: Doc) =>
+      assert(a.flatten === a.flattenOption.getOrElse(a))
+    }
+  }
+
+  test("the left and right side of a union are the same after flattening") {
+    import Doc._
+    def okay(d: Doc): Boolean = d match {
+      case Empty | Text(_) | Line(_) => true
+      case Concat(a, b) => okay(a) && okay(b)
+      case Nest(j, d) => okay(d)
+      case Align(d) => okay(d)
+      case u@Union(a, _) =>
+        (a.flatten === u.bDoc.flatten) && okay(a) && okay(u.bDoc)
+    }
+
+    forAll { (a: Doc) => assert(okay(a)) }
+  }
+
+  test("the left side of a union has a next line as long or longer than the right") {
+    import Doc._
+
+    def nextLineLength(d: Doc): (Boolean, Int) = d match {
+      case Line(_) => (true, 0)
+      case Empty => (false, 0)
+      case Text(s) => (false, s.length)
+      case Nest(j, d) => nextLineLength(d) // nesteding only matters AFTER the next line
+      case Align(d) => nextLineLength(d) // aligning only matters AFTER the next line
+      case Concat(a, b) =>
+        val r1@(done, l) = nextLineLength(a)
+        if (!done) {
+          val (d2, l2) = nextLineLength(b)
+          (d2, l2 + l)
+        } else r1
+      case Union(a, _) => nextLineLength(a) // assume the property is true
+    }
+
+    def okay(d: Doc): Boolean = d match {
+      case Empty | Text(_) | Line(_) => true
+      case Nest(j, d) => okay(d)
+      case Align(d) => okay(d)
+      case Concat(a, b) => okay(a) && okay(b)
+      case u@Union(a, _) =>
+        nextLineLength(a)._2 >= nextLineLength(u.bDoc)._2
+    }
+
+    forAll { (a: Doc) => assert(okay(a)) }
+  }
+
+  test("test json array example") {
+    val items = (0 to 20).map(Doc.str(_))
+    val parts = Doc.fill(Doc.comma + Doc.line, items)
+    val ary = "[" +: ((parts :+ "]").aligned)
+    assert(ary.renderWideStream.mkString == (0 to 20).mkString("[", ", ", "]"))
+    val expect = """[0, 1, 2, 3, 4, 5,
+                   | 6, 7, 8, 9, 10, 11,
+                   | 12, 13, 14, 15, 16,
+                   | 17, 18, 19, 20]""".stripMargin
+    assert(ary.render(20) == expect)
+  }
+
+  test("test Doc.text") {
+    forAll { (s: String) =>
+      assert(Doc.text(s).render(0) == s)
+    }
+  }
+
+  test("test json map example") {
+    val kvs = (0 to 20).map { i => text("\"%s\": %s".format(s"key$i", i)) }
+    val parts = Doc.fill(Doc.comma + Doc.lineOrSpace, kvs)
+
+    val map = parts.bracketBy(Doc.text("{"), Doc.text("}"))
+    assert(map.render(1000) == (0 to 20).map { i => "\"%s\": %s".format(s"key$i", i) }.mkString("{ ", ", ", " }"))
+    assert(map.render(20) == (0 to 20).map { i => "\"%s\": %s".format(s"key$i", i) }.map("  " + _).mkString("{\n", ",\n", "\n}"))
+
+    val map2 = parts.tightBracketBy(Doc.text("{"), Doc.text("}"))
+    assert(map2.render(1000) == (0 to 20).map { i => "\"%s\": %s".format(s"key$i", i) }.mkString("{", ", ", "}"))
+    assert(map2.render(20) == (0 to 20).map { i => "\"%s\": %s".format(s"key$i", i) }.map("  " + _).mkString("{\n", ",\n", "\n}"))
+  }
+
+  test("Doc.repeat matches naive implementation") {
+    /**
+     * comparing large equal documents can be very slow
+     * :(
+     */
+    implicit val generatorDrivenConfig =
+      PropertyCheckConfiguration(minSuccessful = 30)
+    val smallTree = Gen.choose(0, 3).flatMap(genTree)
+    val smallInt = Gen.choose(0, 10)
+
+    def simple(n: Int, d: Doc, acc: Doc): Doc =
+      if(n <= 0) acc else simple(n - 1, d, acc + d)
+
+    forAll(smallTree, smallInt) { (d: Doc, small: Int) =>
+      assert(simple(small, d, Doc.empty) === (d * small))
+    }
+  }
+  test("(d * a) * b == d * (a * b)") {
+    /**
+     * comparing large equal documents can be very slow
+     * :(
+     */
+    implicit val generatorDrivenConfig =
+      PropertyCheckConfiguration(minSuccessful = 30)
+    val smallTree = Gen.choose(0, 3).flatMap(genTree)
+    val smallInt = Gen.choose(0, 3)
+
+    forAll(smallTree, smallInt, smallInt) { (d: Doc, a: Int, b: Int) =>
+      assert(((d * a) * b) === (d * (a * b)))
+    }
+  }
+  test("text(s) * n == s * n for identifiers") {
+    forAll(Gen.identifier, Gen.choose(0, 20)) { (s, n) =>
+      assert((Doc.text(s) * n).render(0) == (s * n))
+    }
+  }
+
+  test("maxWidth is stack safe") {
+    assert(Doc.intercalate(Doc.lineOrSpace, (1 to 100000).map(Doc.str)).maxWidth >= 0)
+  }
+
+  test("renderWide is stack safe") {
+    val nums = (1 to 100000)
+    assert(Doc.intercalate(Doc.lineOrSpace, nums.map(Doc.str)).renderWideStream.mkString == nums.mkString(" "))
+  }
+
+  test("render(w) == renderStream(w).mkString") {
+    forAll { (d: Doc, w: Int) =>
+      assert(d.render(w) == d.renderStream(w).mkString)
+    }
+  }
+  test("renderWide == render(maxWidth)") {
+    forAll { (d: Doc) =>
+      val max = d.maxWidth
+      assert(d.renderWideStream.mkString == d.render(max))
+    }
+  }
+
+  test("character concat works") {
+    forAll { (c1: Char, c2: Char) =>
+      val got = Doc.char(c1) + Doc.char(c2)
+      val expected = Doc.text(new String(Array(c1, c2)))
+      assert(got === expected)
+    }
+
+    // here is a hard case:
+    assert((Doc.char('a') + Doc.char('\n')) === Doc.text("a\n"))
+  }
+
+  test("lineBreak works as expected") {
+    import Doc._
+    // render a tight list:
+    val res = text("(") + Doc.intercalate((Doc.comma + Doc.lineBreak).grouped, (1 to 20).map(Doc.str)) + text(")")
+    assert(res.render(10) == """(1,2,3,4,
+                                |5,6,7,8,9,
+                                |10,11,12,
+                                |13,14,15,
+                                |16,17,18,
+                                |19,20)""".stripMargin)
+    assert(res.renderWideStream.mkString == (1 to 20).mkString("(", ",", ")"))
+  }
+  test("align works as expected") {
+    import Doc._
+    // render with alignment
+    val d1 = text("fooooo ") + (text("bar") line text("baz")).aligned
+
+    assert(d1.render(0) == """fooooo bar
+                             |       baz""".stripMargin)
+  }
+
+  test("fill example") {
+    import Doc.{ comma, text, fill }
+    val ds = text("1") :: text("2") :: text("3") :: Nil
+    val doc = fill(comma + Doc.line, ds)
+
+    assert(doc.render(0) == "1,\n2,\n3")
+    assert(doc.render(6) == "1, 2,\n3")
+    assert(doc.render(10) == "1, 2, 3")
+  }
+
+  test("Doc.tabulate works in some example cases") {
+    val caseMatch = List(
+      ("Item1(x)", Doc.text("callItem(x)")),
+      ("ItemXandItemY(x, y)", Doc.text("callItem(x)") / Doc.text("callItem(y)")),
+      ("ItemXandItemYandZ(x, y, z)", Doc.text("callItem(x)") / Doc.text("callItem(y)") / Doc.text("callItem(z)")))
+
+    val expected = """case Item1(x)                   => callItem(x)
+                     |case ItemXandItemY(x, y)        => callItem(x)
+                     |                                   callItem(y)
+                     |case ItemXandItemYandZ(x, y, z) => callItem(x)
+                     |                                   callItem(y)
+                     |                                   callItem(z)""".stripMargin
+
+    assert(Doc.tabulate(' ', " => ", caseMatch.map { case (s, d) => ("case " + s, d) }).render(20) == expected)
+  }
+
+  test("abbreviated Doc.tabulate works in an example case") {
+
+    val pairs = List(
+      "alpha: " -> Doc.text("the first item in the list"),
+      "beta: " -> Doc.text("another item;") / Doc.text("this one is longer"),
+      "gamma: " -> Doc.text("a third, uninteresting case"),
+      "delta: " -> Doc.text("a fourth,") / (Doc.text("multiline,") / Doc.text("indented")).nested(2) / Doc.text("case"),
+      "epsilon: " -> Doc.text("the ultimate case")
+    )
+
+    val expected = """alpha:   the first item in the list
+                     |beta:    another item;
+                     |         this one is longer
+                     |gamma:   a third, uninteresting case
+                     |delta:   a fourth,
+                     |         multiline,
+                     |           indented
+                     |         case
+                     |epsilon: the ultimate case""".stripMargin
+    assert(Doc.tabulate(pairs).render(40) == expected)
+  }
+
+  test("cat") {
+    assert(Doc.cat(List("1", "2", "3") map Doc.text).render(80) == "123")
+  }
+}
+*Q
+local20 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local174 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*b
+4org/typelevel/paiges/PaigesTest#slowRenderTrim().(d)*dÄä!"
+org/typelevel/paiges/Doc#*A
+local273*okayÄä$"
+ 
+
+local274scala/Boolean#í: *ï
+7org/typelevel/paiges/PaigesTest.EquivSyntax#`<init>`(). Ä@*<init>ÄäDB
+ >
+<org/typelevel/paiges/PaigesTest.EquivSyntax#`<init>`().(lhs)í: *8
+local4*randomWidthÄä
+  
+scala/Int#í: *Q
+local41 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*N
+local195 Ä*goodWÄä2"0
+.,scala/collection/Iterator#
+scala/Int#*Y
+local189 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*T
+local294 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*7
+local153 Ä*trimÄä"
+scala/Predef.String#*Q
+local29 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*6
+local180*dÄä!"
+org/typelevel/paiges/Doc#*n
+local252*nextLineLengthÄäGE
+ 
+
+local25353scala/Tuple2#scala/Boolean#
+scala/Int#í: *R
+local366 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local56 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*<
+local393 Ä*x$16Ää!"
+org/typelevel/paiges/Doc#*S
+local168 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local288 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local14 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local351 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*:
+local387 Ä*d1Ää!"
+org/typelevel/paiges/Doc#*.
+local345*sÄä"
+java/lang/String#*P
+local35 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*@
+local372 Ä*expectedÄä!"
+org/typelevel/paiges/Doc#*V
+local267 Ä*x$10Ää;9
+ 53scala/Tuple2#scala/Boolean#
+scala/Int#*>
+local135 Ä*dÄä&"$
+" org/typelevel/paiges/Doc.Text#**
+local7 Ä*x$4Ää"
+
+scala/Int#*N
+local354 Ä*numsÄä3"1
+/-+scala/collection/immutable/Range.Inclusive#*R
+local234 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local348 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*Q
+local38 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local261 Ä*r1Ää9"7
+53scala/Tuple2#scala/Boolean#
+scala/Int#*)
+local369*c1Ää"
+scala/Char#*9
+local91 Ä*snÄä!"
+org/typelevel/paiges/Doc#*R
+local183 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*6
+local327*dÄä!"
+org/typelevel/paiges/Doc#*Q
+local17 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local249 Ä*aÄä!"
+org/typelevel/paiges/Doc#*S
+local162 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*H
+local156 Ä* $org_scalatest_assert_macro_leftÄä"
+¢
+local153*'
+local360*wÄä"
+
+scala/Int#*Y
+local375 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#**
+local255 Ä*jÄä"
+
+scala/Int#*6
+local282*aÄä!"
+org/typelevel/paiges/Doc#*Y
+local333 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*R
+local177 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Z
+local23 Ä*wordsÄä?"=
+;9 scala/collection/immutable/List#java/lang/String#*Y
+local240 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*S
+local141 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local276 Ä*dÄä!"
+org/typelevel/paiges/Doc#*Q
+local123 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*R
+local264 Ä*r1Ää9"7
+53scala/Tuple2#scala/Boolean#
+scala/Int#*1
+local159*bÄä"
+scala/Predef.String#*S
+local357 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local222 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local117 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*Z
+local321 Ä*	smallTreeÄä:"8
+64org/scalacheck/Gen#org/typelevel/paiges/Doc#*S
+local144 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*‚
+1org/typelevel/paiges/PaigesTest#slowRenderTrim().*slowRenderTrimÄäëé
+ p
+4org/typelevel/paiges/PaigesTest#slowRenderTrim().(d)
+8org/typelevel/paiges/PaigesTest#slowRenderTrim().(width)scala/Predef.String#í: *R
+local11 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local243 Ä*aÄä!"
+org/typelevel/paiges/Doc#*6
+local237*aÄä!"
+org/typelevel/paiges/Doc#*j
+local88 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*S
+local150 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*T
+local315 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*;
+local414 Ä*expectedÄä"
+scala/Predef.String#*1
+local408 Ä*sÄä"
+java/lang/String#*9
+local258 Ä*aÄä!"
+org/typelevel/paiges/Doc#*Q
+local94 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*=
+local216 Ä*flatCÄä!"
+org/typelevel/paiges/Doc#*S
+local138 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local342 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local73 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*1
+local165*bÄä"
+scala/Predef.String#*S
+local420 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*S
+local293 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*S
+local318 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*5
+local55*cÄä!"
+org/typelevel/paiges/Doc#*<
+local392 Ä*x$17Ää!"
+org/typelevel/paiges/Doc#*Y
+local231 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*S
+local82 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*,
+local147*width0Ää"
+
+scala/Int#*Ç
+)org/typelevel/paiges/PaigesTest.docEquiv. †*docEquivÄä=;
+ 75scala/package.Equiv#org/typelevel/paiges/Doc#í: *T
+local417 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*N
+local111 Ä*otherÄä2"0
+.,scala/package.List#java/lang/String#*Q
+local97 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*J
+local324 Ä*smallIntÄä+")
+'%org/scalacheck/Gen#
+scala/Int#*R
+local219 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local246 Ä*dÄä!"
+org/typelevel/paiges/Doc#*R
+local132 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local126 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*.
+local105*sÄä"
+java/lang/String#*T
+local204 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*Y
+local210 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*6
+local339*dÄä!"
+org/typelevel/paiges/Doc#*R
+local194 Ä*	justAfterÄä2"0
+.,scala/collection/Iterator#
+scala/Int#*@
+local76 Ä*baosÄä&"$
+" java/io/ByteArrayOutputStream#*'
+local303*iÄä"
+
+scala/Int#*+
+local330*smallÄä"
+
+scala/Int#*R
+local402 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local225 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*5
+local61*cÄä!"
+org/typelevel/paiges/Doc#*T
+local306 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*'
+local312*iÄä"
+
+scala/Int#*3
+local207*strÄä"
+scala/Predef.String#*ë
+local405 Ä*	caseMatchÄäq"o
+mk scala/collection/immutable/List#GEscala/Tuple2#java/lang/String#org/typelevel/paiges/Doc#*'
+local380*tÄä"
+
+scala/Any#*4
+local70 Ä*s2Ää"
+scala/Predef.String#*6
+local182*dÄä!"
+org/typelevel/paiges/Doc#*R
+local296 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*[
+8org/typelevel/paiges/PaigesTest#slowRenderTrim().(width)*widthÄä"
+
+scala/Int#*X
+local58 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*;
+local395 Ä*docÄä!"
+org/typelevel/paiges/Doc#*j
+local85 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*R
+local129 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#**
+local6 Ä*x$1Ää"
+
+scala/Int#*I
+local43 Ä*!$org_scalatest_assert_macro_rightÄä"
+
+scala/Int#*'
+local197*wÄä"
+
+scala/Int#*S
+local411 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#**
+local275 Ä*jÄä"
+
+scala/Int#*T
+local120 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*8
+local114 Ä*expectedÄä"
+java/lang/String#*5
+local37*bÄä!"
+org/typelevel/paiges/Doc#*k
+local374 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*X
+local64 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*Y
+local213 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*6
+local228*aÄä!"
+org/typelevel/paiges/Doc#*S
+local108 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local281 Ä*aÄä!"
+org/typelevel/paiges/Doc#*6
+local176 Ä*x$7Ää"
+scala/Predef.String#*l
+<org/typelevel/paiges/PaigesTest.EquivSyntax#`<init>`().(lhs)*lhsÄä!"
+org/typelevel/paiges/Doc#*S
+local389 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*4
+local79 Ä*s2Ää"
+scala/Predef.String#*T
+local290 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*S
+local31 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*N
+local185 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Boolean#*T
+local179 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*Q
+local398 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*R
+local102 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local278 Ä*aÄä!"
+org/typelevel/paiges/Doc#*-
+local201 Ä*wNegÄä"
+
+scala/Int#*R
+local170 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#**
+local9 Ä*x$2Ää"
+
+scala/Int#*R
+local356 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*'
+local300*iÄä"
+
+scala/Int#**
+local263 Ä*lÄä"
+
+scala/Int#*S
+local309 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*1
+local164*aÄä"
+scala/Predef.String#*1
+local158*aÄä"
+scala/Predef.String#*g
+local299 Ä*kvsÄäM"K
+IG&scala/collection/immutable/IndexedSeq#org/typelevel/paiges/Doc#*F
+local0*equivÄä*(
+ 
+local1
+local2scala/Boolean#í: *A
+local191*wsÄä+")
+'%scala/package.List#
+scala/Int#*k
+local377 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*X
+local52 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*@
+local67 Ä*baosÄä&"$
+" java/io/ByteArrayOutputStream#*i
+local284 Ä*itemsÄäM"K
+IG&scala/collection/immutable/IndexedSeq#org/typelevel/paiges/Doc#*9
+local25 Ä*d2Ää!"
+org/typelevel/paiges/Doc#*P
+local19 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*T
+local383 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*S
+local362 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local257 Ä*dÄä!"
+org/typelevel/paiges/Doc#*Q
+local10 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*I
+local46 Ä*!$org_scalatest_assert_macro_rightÄä"
+
+scala/Int#*Q
+local13 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*/
+local3 Ä*maxWidthÄä"
+
+scala/Int#*Y
+local344 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*'
+local350*tÄä"
+
+scala/Any#*6
+local359*dÄä!"
+org/typelevel/paiges/Doc#*I
+local40 Ä*!$org_scalatest_assert_macro_rightÄä"
+
+scala/Int#*k
+local239 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*5
+local49*cÄä!"
+org/typelevel/paiges/Doc#*k
+local188 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*i
+9org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().(rhs)*rhsÄä!"
+org/typelevel/paiges/Doc#*4
+local287 Ä*x$12Ää"
+java/lang/String#**
+local245 Ä*jÄä"
+
+scala/Int#*X
+local96 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*6
+local152*dÄä!"
+org/typelevel/paiges/Doc#*9
+local272 Ä*aÄä!"
+org/typelevel/paiges/Doc#*R
+local167 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local34 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*;
+local371 Ä*gotÄä!"
+org/typelevel/paiges/Doc#*,
+local365 Ä*maxÄä"
+
+scala/Int#**
+local266 Ä*lÄä"
+
+scala/Int#*R
+local173 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*J
+local338 Ä*smallIntÄä+")
+'%org/scalacheck/Gen#
+scala/Int#*S
+local28 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*T
+local386 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local251 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*6
+local146*dÄä!"
+org/typelevel/paiges/Doc#*R
+local155 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*+
+local269 Ä*l2Ää"
+
+scala/Int#*Q
+local128 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*=
+local233 Ä*aflatÄä!"
+org/typelevel/paiges/Doc#*T
+local368 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*Y
+local227 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*˘
+ org/typelevel/paiges/PaigesTest#*
+PaigesTestÄäΩ
+∫
+ org/scalatest/FunSuite#"ò
++org/typelevel/paiges/PaigesTest#`<init>`().
+6org/typelevel/paiges/PaigesTest#generatorDrivenConfig.
+1org/typelevel/paiges/PaigesTest#slowRenderTrim().í: *4
+local254 Ä*sÄä"
+scala/Predef.String#*R
+local140 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*'
+local326*nÄä"
+
+scala/Int#*R
+local149 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*8
+local16 Ä*gÄä!"
+org/typelevel/paiges/Doc#*J
+local353 Ä*!$org_scalatest_assert_macro_rightÄä"
+
+scala/Int#*?
+local248 Ä*uÄä'"%
+#!org/typelevel/paiges/Doc.Union#*Q
+local84 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*<
+local311 Ä*map2Ää!"
+org/typelevel/paiges/Doc#*R
+local410 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local419 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*X
+local99 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*k
+local332 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*P
+local22 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*&
+local90*nÄä"
+
+scala/Int#*Q
+local134 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*π
+.org/typelevel/paiges/PaigesTest.EquivSyntax().  *EquivSyntaxÄämk
+ 5
+3org/typelevel/paiges/PaigesTest.EquivSyntax().(lhs)0.,org/typelevel/paiges/PaigesTest.EquivSyntax#í: *R
+local161 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local347 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*1
+local78 Ä*s1Ää"
+java/lang/String#*å
+local260 Ä*x$9Äärp
+ ljscala/Tuple3#53scala/Tuple2#scala/Boolean#
+scala/Int#scala/Boolean#
+scala/Int#*R
+local143 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*c
+local407*x0$1ÄäK"I
+GEscala/Tuple2#java/lang/String#org/typelevel/paiges/Doc#*'
+local101*wÄä"
+
+scala/Int#*Q
+local87 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Y
+local221 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*Y
+local236 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*S
+local122 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*S
+local116 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*6
+local329*dÄä!"
+org/typelevel/paiges/Doc#*Z
+local335 Ä*	smallTreeÄä:"8
+64org/scalacheck/Gen#org/typelevel/paiges/Doc#*K
++org/typelevel/paiges/PaigesTest#`<init>`(). Ä@*<init>Ää
+  í: *6
+local242*dÄä!"
+org/typelevel/paiges/Doc#*R
+local137 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local93 Ä*unÄä!"
+org/typelevel/paiges/Doc#*ô
+local320 †*generatorDrivenConfigÄäm"k
+ig
+'¢$"org/scalatest/prop/PropertyChecks.<org/scalatest/prop/Configuration#PropertyCheckConfiguration#*'
+local200*wÄä"
+
+scala/Int#*k
+local209 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*6
+local215*cÄä!"
+org/typelevel/paiges/Doc#*ç
+local413 Ä*pairsÄäq"o
+mk scala/collection/immutable/List#GEscala/Tuple2#java/lang/String#org/typelevel/paiges/Doc#*S
+local314 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local308 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*'
+local341*bÄä"
+
+scala/Int#*&
+local66*wÄä"
+
+scala/Int#*F
+local72 Ä* $org_scalatest_assert_macro_leftÄä"
+¢	local69*T
+local131 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local317 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*5
+local48*bÄä!"
+org/typelevel/paiges/Doc#*S
+local416 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*S
+local385 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*&
+local75*wÄä"
+
+scala/Int#*S
+local119 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*;
+local302 Ä*mapÄä!"
+org/typelevel/paiges/Doc#*+
+local323*depthÄä"
+
+scala/Int#*R
+local187 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*j
+0org/typelevel/paiges/PaigesTest.EquivSyntax#lhs. Ä*lhsÄä#!
+ org/typelevel/paiges/Doc#í *1
+local69 Ä*s1Ää"
+java/lang/String#*Q
+local401 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*`
+local391 Ä*dsÄäG"E
+CA scala/collection/immutable/List#org/typelevel/paiges/Doc#*5
+local54*bÄä!"
+org/typelevel/paiges/Doc#*S
+local203 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*k
+local230 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*8
+local125 Ä*expectedÄä"
+java/lang/String#*7
+local193 Ä*maxRÄä"
+scala/Predef.String#*=
+local218 Ä*rightÄä!"
+org/typelevel/paiges/Doc#*Y
+local224 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*5
+local60*bÄä!"
+org/typelevel/paiges/Doc#*N
+local110 Ä*partsÄä2"0
+.,scala/package.List#java/lang/String#*R
+local292 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*;
+local286 Ä*aryÄä!"
+org/typelevel/paiges/Doc#*T
+local104 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*F
+local81 Ä* $org_scalatest_assert_macro_leftÄä"
+¢	local78*R
+local181 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*1
+local295*sÄä"
+scala/Predef.String#*5
+local36*aÄä!"
+org/typelevel/paiges/Doc#*Q
+local404 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*<
+local394 Ä*x$15Ää!"
+org/typelevel/paiges/Doc#*R
+local107 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local289 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*>
+local206 Ä*secondÄä!"
+org/typelevel/paiges/Doc#*T
+local175 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*H
+local42 Ä* $org_scalatest_assert_macro_leftÄä"
+
+scala/Int#*6
+local274*dÄä!"
+org/typelevel/paiges/Doc#*S
+local305 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*T
+local169 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local373 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local5 Ä*widthsÄä8"6
+42 scala/collection/immutable/List#
+scala/Int#*'
+local196*wÄä"
+
+scala/Int#*j
+local63 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*R
+local21 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*S
+local367 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*k
+local212 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*j
+local57 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*?
+local280 Ä*uÄä'"%
+#!org/typelevel/paiges/Doc.Union#*6
+local160 Ä*x$6Ää"
+scala/Predef.String#*R
+local388 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local113 Ä*dÄä!"
+org/typelevel/paiges/Doc#*/
+local268 Ä*d2Ää"
+scala/Boolean#*'
+local355*tÄä"
+
+scala/Any#*H
+local45 Ä* $org_scalatest_assert_macro_leftÄä"
+
+scala/Int#*6
+local199*aÄä!"
+org/typelevel/paiges/Doc#*R
+local18 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#**
+local8 Ä*x$3Ää"
+
+scala/Int#*M
+local184 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Boolean#*T
+local142 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*T
+local157 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local361 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*j
+local51 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*T
+local163 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*9
+local277 Ä*dÄä!"
+org/typelevel/paiges/Doc#*R
+local283 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local178 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*H
+local39 Ä* $org_scalatest_assert_macro_leftÄä"
+
+scala/Int#*S
+local382 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local376 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*6
+local190*dÄä!"
+org/typelevel/paiges/Doc#*A
+local241*okayÄä$"
+ 
+
+local242scala/Boolean#í: *'
+local340*aÄä"
+
+scala/Int#*T
+local298 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*T
+local349 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local30 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local24 Ä*d1Ää!"
+org/typelevel/paiges/Doc#*S
+local397 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*1
+local262 Ä*doneÄä"
+scala/Boolean#*9
+local256 Ä*dÄä!"
+org/typelevel/paiges/Doc#*9
+local124 Ä*dÄä!"
+org/typelevel/paiges/Doc#*Œ
+6org/typelevel/paiges/PaigesTest#generatorDrivenConfig. †*generatorDrivenConfigÄäom
+ ig
+'¢$"org/scalatest/prop/PropertyChecks.<org/scalatest/prop/Configuration#PropertyCheckConfiguration#í: *4
+local2*yÄä!"
+org/typelevel/paiges/Doc#*k
+local343 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*;
+local379 Ä*resÄä!"
+org/typelevel/paiges/Doc#*Q
+local33 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local238 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local145 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*+
+local337*depthÄä"
+
+scala/Int#*R
+local27 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*6
+local364*dÄä!"
+org/typelevel/paiges/Doc#*k
+local223 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*j
+local95 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*X
+local89 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*P
+local12 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*g
+.org/typelevel/paiges/PaigesTest.readResolve().*readResolveÄä
+  java/lang/Object#í
+ *Q
+local421 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*Q
+local80 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*T
+local151 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*á
+,org/typelevel/paiges/PaigesTest.EquivSyntax#  *EquivSyntaxÄäº
+π
+ scala/AnyRef#"°
+0org/typelevel/paiges/PaigesTest.EquivSyntax#lhs.
+7org/typelevel/paiges/PaigesTest.EquivSyntax#`<init>`().
+4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().í: *9
+local244 Ä*bÄä!"
+org/typelevel/paiges/Doc#*6
+local250*aÄä!"
+org/typelevel/paiges/Doc#*Q
+local139 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*9
+local259 Ä*bÄä!"
+org/typelevel/paiges/Doc#*T
+local172 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*6
+local166 Ä*resÄä"
+scala/Predef.String#*T
+local358 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*)
+local370*c2Ää"
+scala/Char#*S
+local130 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*1
+local265 Ä*doneÄä"
+scala/Boolean#*+
+local271 Ä*l2Ää"
+
+scala/Int#*.
+local148 Ä*widthÄä"
+
+scala/Int#*c
+3org/typelevel/paiges/PaigesTest.EquivSyntax().(lhs)*lhsÄä!"
+org/typelevel/paiges/Doc#*I
+local352 Ä* $org_scalatest_assert_macro_leftÄä"
+
+scala/Int#*Q
+local62 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local247 Ä*dÄä!"
+org/typelevel/paiges/Doc#*'
+local106*wÄä"
+
+scala/Int#*T
+local310 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*S
+local133 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*=
+local205 Ä*firstÄä!"
+org/typelevel/paiges/Doc#*3
+local418*strÄä"
+scala/Predef.String#*6
+local232*aÄä!"
+org/typelevel/paiges/Doc#*S
+local127 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local331 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*;
+local154 Ä*slowTrimÄä"
+scala/Predef.String#*S
+local403 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*0
+local112*strÄä"
+java/lang/String#*6
+local253*dÄä!"
+org/typelevel/paiges/Doc#*j
+local98 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*R
+local211 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*b
+local325*simpleÄäCA
+ 
+local326
+local327
+local328org/typelevel/paiges/Doc#í: *P
+local15 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*T
+local319 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*5
+local83*aÄä!"
+org/typelevel/paiges/Doc#*'
+local346*nÄä"
+
+scala/Int#*k
+local226 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*4
+local77 Ä*pwÄä"
+java/io/PrintWriter#*R
+local304 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local313 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*8
+local328*accÄä!"
+org/typelevel/paiges/Doc#*R
+local381 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local71 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local44 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*T
+local412 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*1
+local100*sÄä"
+scala/Predef.String#*R
+local115 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local50 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*5
+local59*aÄä!"
+org/typelevel/paiges/Doc#*R
+local208 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local121 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*k
+local235 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*8
+local136 Ä*expectedÄä"
+java/lang/String#*´
+ org/typelevel/paiges/PaigesTest.
+ *
+PaigesTestÄäÌ
+Í
+ scala/AnyRef#scala/Serializable#"π
+)org/typelevel/paiges/PaigesTest.docEquiv.
+,org/typelevel/paiges/PaigesTest.EquivSyntax#
+.org/typelevel/paiges/PaigesTest.EquivSyntax().
+.org/typelevel/paiges/PaigesTest.readResolve().í: *ô
+local334 †*generatorDrivenConfigÄäm"k
+ig
+'¢$"org/scalatest/prop/PropertyChecks.<org/scalatest/prop/Configuration#PropertyCheckConfiguration#*R
+local198 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local229 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*7
+local65*docÄä!"
+org/typelevel/paiges/Doc#*S
+local297 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*'
+local307*iÄä"
+
+scala/Int#*9
+local92 Ä*tnÄä!"
+org/typelevel/paiges/Doc#*;
+local406 Ä*expectedÄä"
+scala/Predef.String#*6
+local214*bÄä!"
+org/typelevel/paiges/Doc#*k
+local220 Ä* $org_scalatest_assert_macro_leftÄä4"2
+0.,org/typelevel/paiges/PaigesTest.EquivSyntax#*R
+local396 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*Q
+local109 Ä*!$org_scalatest_assert_macro_rightÄä"
+java/lang/String#*X
+local86 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*=
+local301 Ä*partsÄä!"
+org/typelevel/paiges/Doc#*9
+local291 Ä*expectÄä"
+scala/Predef.String#*6
+local186*dÄä!"
+org/typelevel/paiges/Doc#*S
+local400 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*9
+local409 Ä*dÄä!"
+org/typelevel/paiges/Doc#*S
+local103 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*R
+local399 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*R
+local118 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*S
+local171 Ä* $org_scalatest_assert_macro_leftÄä"
+scala/Predef.String#*T
+local363 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*5
+local47*aÄä!"
+org/typelevel/paiges/Doc#*5
+local53*aÄä!"
+org/typelevel/paiges/Doc#*T
+local390 Ä*!$org_scalatest_assert_macro_rightÄä"
+scala/Predef.String#*R
+local384 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*9
+local279 Ä*bÄä!"
+org/typelevel/paiges/Doc#*=
+local285 Ä*partsÄä!"
+org/typelevel/paiges/Doc#*4
+local1*xÄä!"
+org/typelevel/paiges/Doc#*Y
+local378 Ä*!$org_scalatest_assert_macro_rightÄä!"
+org/typelevel/paiges/Doc#*R
+local202 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*4
+local68 Ä*pwÄä"
+java/io/PrintWriter#*ù
+4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().*===ÄäUS
+ ;
+9org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().(rhs)scala/Boolean#í: *R
+local415 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*/
+local270 Ä*d2Ää"
+scala/Boolean#*8
+local32 Ä*pÄä!"
+org/typelevel/paiges/Doc#*Q
+local26 Ä* $org_scalatest_assert_macro_exprÄä"
+org/scalactic/Bool#*<
+local217 Ä*leftÄä!"
+org/typelevel/paiges/Doc#*'
+local316*iÄä"
+
+scala/Int#**
+local192 Ä*mÄä"
+
+scala/Int#*7
+local74*docÄä!"
+org/typelevel/paiges/Doc#2
+
+˘˘ local27721
+-5- <#org/typelevel/paiges/Doc#grouped().2
+
+—— local3592?
+
+∆#∆ +/scala/collection/immutable/Stream#mkString(+1).2)
+
+ÑÑ org/typelevel/paiges/Doc.20
+
+ΩΩ  org/typelevel/paiges/Doc.text().2#
+
+∫∫ org/scalacheck/Gen.2/
+Q,Q 3!org/scalatest/Assertions#succeed.2.
+
+ÍÍ org/typelevel/paiges/Doc.Text.2
+
+ﬁ:ﬁ ;local24820
+33 
+"org/scalatest/Assertions#assert().2
+
+¨¨ local3282)
+
+ﬁﬁ org/typelevel/paiges/Doc.22
+
+¬¬ "org/scalatest/Assertions#assert().2
+
+ää local1942
+
+÷÷ local14622
+
+¨¨ 
+"org/scalatest/Assertions#assert().2:
+
+†0† 6*scala/collection/TraversableOnce#toList().2/
+
+˘˘ org/typelevel/paiges/Doc.Align.2
+
+Æ#Æ $local32922
+
+õ,õ 2"org/typelevel/paiges/Doc#render().27
+
+öUö X'scala/collection/TraversableLike#map().20
+
+à"à & org/typelevel/paiges/Doc.text().22
+
+ÇÇ 
+"org/scalatest/Assertions#assert().2
+
+ÆÆ local3212
+
+¨+¨ .local32823
+
+È;È D#org/typelevel/paiges/Doc.lineBreak.2
+
+¨(¨ )local3272%
+
+ﬁ2ﬁ 4scala/Boolean#`&&`().2%
+
+⁄#⁄ %scala/Boolean#`&&`().2
+
+ºº local3352
+
+—— local3602"
+ scala/package.Equiv#20
+
+ò"ò & org/typelevel/paiges/Doc.text().2L
+
+‹‹ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2
+
+ÁÁ local2532
+]] local532)
+
+◊◊ org/typelevel/paiges/Doc.22
+
+°° "org/scalatest/FunSuiteLike#test().23
+
+ÙÙ #org/typelevel/paiges/Doc#isEmpty().2
+
+˘˘ local2732
+
+ÔÔ local26522
+
+®® %"org/typelevel/paiges/Doc#render().22
+
+ôô "org/typelevel/paiges/Doc#render().25
+c3c >'org/typelevel/paiges/Doc#lineOrSpace().2/
+
+ÈÈ org/typelevel/paiges/Doc.Empty.2/
+
+«B« Eorg/typelevel/paiges/Doc.str().2
+}} local782
+
+ÍÍ local1642L
+
+’’ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2'
+" 'scala/math/Equiv#equiv().2
+
+›
+› local3712%
+ org/scalatest/FunSuite#27
+
+«:« ='scala/collection/TraversableLike#map().2,
+
+©© org/scalacheck/Gen.choose().2-
+6 9scala/collection/immutable/Nil.2<
+
+◊◊ ,org/typelevel/paiges/Doc#renderWideStream().20
+
+ı ı $ org/typelevel/paiges/Doc.text().2
+:: local252)
+
+ò-ò 0org/typelevel/paiges/Doc.2
+
+â
+â local1942
+
+ﬁ
+ﬁ local3722$
+
+•"• $scala/Char#`==`(+2).2>
+
+«« .org/typelevel/paiges/PaigesTest.EquivSyntax().2)
+
+ÈÈ org/typelevel/paiges/Doc.2
+
+€€ local24625
+y
+y 'org/typelevel/paiges/Doc#writeToTrim().2
+ org/typelevel/2
+;; local252.
+--  org/typelevel/paiges/Doc#`:/`().2
+
+’ ’ %local1482
+
+ÌÌ local16422
+
+·· "org/scalatest/Assertions#assert().2B
+WW 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+‰0‰ 1local1582
+
+û.û /local3162
+
+““ local23726
+
+≈≈ &org/typelevel/paiges/Doc#renderTrim().28
+
+—— *(org/typelevel/paiges/Doc#renderStream().2L
+
+ÀÀ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2'
+
+û_û `java/lang/String#`+`().2
+
+”” local1472/
+
+ÏÏ org/typelevel/paiges/Doc#`&`().20
+
+†+† / scala/collection/immutable/List.2%
+
+˙#˙ %scala/Boolean#`&&`().2
+
+›$› %local15222
+
+éé "org/scalatest/FunSuiteLike#test().2
+]*] +local542-
+
+õõ scala/Predef.augmentString().2
+
+ë
+ë local20120
+
+ÌÌ  org/typelevel/paiges/Doc.Concat.2.
+"" ! org/typelevel/paiges/Doc.text().2>
+
+ÕÕ .org/typelevel/paiges/PaigesTest.EquivSyntax().2F
+
+Ô+Ô 66scala/collection/immutable/StringLike#stripMargin(+1).2
+
+ö_ö `local1062
+
+≥≥ local1142)
+
+âYâ \org/typelevel/paiges/Doc.2
+
+´´ local3252/
+
+˛˛ org/typelevel/paiges/Doc.comma.22
+
+ôô "org/scalatest/FunSuiteLike#test().22
+
+   "org/scalatest/FunSuiteLike#test().22
+
+€€ "org/scalatest/FunSuiteLike#test().2#
+
+¡¡ org/scalacheck/Gen.2/
+
+ÈgÈ horg/typelevel/paiges/Doc#`+`().2
+
+¬1¬ 2local3462
+Q!Q "local372+
+
+ö7ö <org/scalacheck/Gen.const().2
+ org/typelevel/paiges/2+
+
+ö ö "scala/runtime/RichInt#to().2'
+	 org/typelevel/paiges/Doc.22
+
+öö "org/typelevel/paiges/Doc#render().2
+
+ë$ë %local2002L
+
+¡¡ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+7).22
+
+êê "org/scalatest/Assertions#assert().2
+
+íí  local1992
+
+ÅÅ local39522
+
+˜˜ "org/typelevel/paiges/Doc#render().27
+
+û(û +'scala/collection/TraversableLike#map().2
+
+ˇˇ local2822;
+
+â â (+scala/collection/IndexedSeqLike#iterator().2>
+0 30org/typelevel/paiges/PaigesTest.EquivSyntax#lhs.2F
+
+ä(ä 36scala/collection/immutable/StringLike#stripMargin(+1).2?
+
+•*• 1/scala/collection/IndexedSeqOptimized#reverse().2
+
+í%í .local4052
+
+êê 
+scala/Int#2,
+
+ππ org/scalacheck/Gen.choose().2
+
+ÏÏ local2572
+
+ÍÍ local2542
+
+( )local2592)
+
+∫∫ org/typelevel/paiges/Doc.2D
+
+øø 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+ã
+ã local922L
+
+ÛÛ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2.
+99  org/typelevel/paiges/Doc#`:+`().2>
+
+¬¬ .org/typelevel/paiges/PaigesTest.EquivSyntax().22
+
+ïï "org/scalatest/FunSuiteLike#test().20
+
+ÑÑ  org/typelevel/paiges/Doc.fill().2
+
+áá local19022
+
+¿¿ "org/scalatest/Assertions#assert().2
+
+›› local2482
+W)W *local492
+
+í[í _local20126
+
+µµ &org/typelevel/paiges/Doc#renderTrim().2)
+
+¨¨ org/typelevel/paiges/Doc.2<
+
+∂∂ ,org/typelevel/paiges/Doc#renderStreamTrim().2/
+
+õeõ forg/typelevel/paiges/Doc#`/`().2'
+bb org/typelevel/paiges/Doc#2
+
+¸/¸ 0local28022
+
+œœ 
+"org/scalatest/Assertions#assert().22
+
+÷÷ "org/scalatest/FunSuiteLike#test().22
+
+íGí M"org/typelevel/paiges/Doc#render().2,
+
+ââ org/scalacheck/Gen.choose().2)
+
+õõ org/typelevel/paiges/Doc.2
+( )local122
+
+ÚÚ "org/scalatest/FunSuiteLike#test().2
+
+ÿ ÿ !local24222
+
+ÕÕ 
+"org/scalatest/Assertions#assert().2
+
+éé local9227
+
+ÉÉ 'scala/collection/TraversableLike#map().2(
+
+ﬁﬁ  scala/StringContext#s().2
+
+§§ local11222
+
+®® 
+"org/scalatest/Assertions#assert().2)
+
+êê org/typelevel/paiges/Doc#22
+
+ôô 
+"org/scalatest/Assertions#assert().2
+
+ÖÖ local2862)
+
+ÃÃ org/typelevel/paiges/Doc.2(
+
+ï6ï 8java/lang/Object#`==`().22
+
+íXí ^"org/typelevel/paiges/Doc#render().2
+
+ÑÑ local832
+
+ˆˆ local27327
+
+ù*ù -'scala/collection/TraversableLike#map().20
+
+úú  org/typelevel/paiges/Doc.text().2
+
+ã0ã 4local19322
+
+ÇÇ "org/typelevel/paiges/Doc#render().2
+
+ü$ü '
+scala/Int#2
+;; "local232!
+QQ  scala/Int#`==`(+3).2'
+" %org/typelevel/paiges/Doc#20
+!! "org/scalatest/FunSuiteLike#test().2
+VV local4722
+
+«« 
+"org/scalatest/Assertions#assert().2)
+
+„„ org/typelevel/paiges/Doc.21
+l
+l #org/typelevel/paiges/Doc#writeTo().2
+
+åå local902?
+
+’'’ //scala/collection/immutable/Stream#mkString(+1).2.
+
+ŸŸ org/typelevel/paiges/Doc.Text.2)
+
+ÉÉ org/typelevel/paiges/Doc.2
+
+º-º .local3392D
+
+ÅÅ !4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+‹‹ local2412<
+
+åå ,scala/collection/immutable/StringLike#`*`().2
+
+‰‰ local15920
+
+ÎÎ  org/typelevel/paiges/Doc.text().22
+
+ÅÅ 
+"org/scalatest/Assertions#assert().2)
+
+õgõ jorg/typelevel/paiges/Doc.22
+
+„„ 
+"org/scalatest/Assertions#assert().20
+
+ÏÏ  org/typelevel/paiges/Doc.text().24
+
+«H« P$org/typelevel/paiges/Doc#maxWidth().21
+
+ÇÇ !org/scalatest/Assertions#succeed.2.
+77  scala/collection/immutable/List.2/
+xx !java/io/PrintWriter#`<init>`(+2).2
+
+¨¨ 	local1132)
+
+ÁÁ org/typelevel/paiges/Doc.2
+
+—— local3592&
+PP java/lang/Object#`##`().2L
+
+ÄÄ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2
+|
+| local792D
+
+Ø#Ø &4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().22
+
+–– "org/scalatest/FunSuiteLike#test().20
+"," 2"org/typelevel/paiges/Doc#render().22
+
+ÇÇ "org/scalatest/FunSuiteLike#test().2A
+
+≈ ≈ .1org/typelevel/paiges/PaigesTest#slowRenderTrim().2
+/ 0local220
+
+‰‰  org/typelevel/paiges/Doc.text().22
+
+ıYı _"org/typelevel/paiges/Doc#render().2
+
+€€ local2462
+
+≈≈ local12420
+
+õ0õ 4 org/typelevel/paiges/Doc.text().25
+cc 'org/typelevel/paiges/Doc#lineOrSpace().2L
+
+˚˚ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).27
+
+˝˝ 'scala/collection/immutable/List#`::`().2*
+
+¸¸ scala/Boolean#`unary_!`().2)
+
+òò !org/typelevel/paiges/Doc.2
+]] local5420
+
+âCâ G org/typelevel/paiges/Doc.text().25
+
+üü %org/typelevel/paiges/Doc.paragraph().20
+
+›#› ' org/typelevel/paiges/Doc.char().22
+
+ûû "org/typelevel/paiges/Doc#render().2
+uu java/io/22
+
+Ï!Ï '"org/typelevel/paiges/Doc#render().2-
+
+®%® ,org/scalacheck/Gen#flatMap().2
+
+ÜÜ local1902J
+bb 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+9).20
+&9& ?"org/typelevel/paiges/Doc#render().20
+
+¿¿  org/typelevel/paiges/Doc.text().2:
+
+ä#ä +*scala/collection/LinearSeqLike#iterator().2L
+
+ÆÆ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+7).2&
+PP java/lang/Object#`##`().2
+
+ëë local2002
+
+¶¶ &local3202
+
+¥ ¥ (local1142!
+OO scala/Int#`==`(+3).2
+PP local372
+
+¨!¨ "local3262
+
+ïFï Glocal3002'
+NN org/typelevel/paiges/Doc#20
+PP "org/scalatest/Assertions#assert().2<
+
+∆∆ ,org/typelevel/paiges/Doc#renderStreamTrim().2(
+
+ê#ê %java/lang/Object#`==`().2D
+
+ÕÕ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2#
+
+öö org/scalacheck/Gen.2
+ 
+org/2
+
+’’ local1462/
+
+‹‹ org/typelevel/paiges/Doc.Align.2
+
+Ï.Ï 1local1662
+
+ﬁﬁ local2482)
+
+∞∞ org/typelevel/paiges/Doc.2
+
+ôNô Olocal30320
+
+â)â - org/typelevel/paiges/Doc.text().2)
+
+êê org/typelevel/paiges/Doc.2A
+
+µ µ .1org/typelevel/paiges/PaigesTest#slowRenderTrim().2-
+W"W #org/typelevel/paiges/Doc#`+`().2
+
+ÜÜ local4052>
+
+ØØ ".org/typelevel/paiges/PaigesTest.EquivSyntax().2
+
+ãã local1972
+
+’’ local3642/
+
+ÑÑ "org/typelevel/paiges/Doc.comma.2'
+
+
+ org/typelevel/paiges/Doc#22
+
+ÉÉ "org/scalatest/Assertions#assert().2
+
+££ local11122
+
+—— "org/typelevel/paiges/Doc#render().21
+
+õõ !org/typelevel/paiges/Doc.split().2(
+
+íí java/lang/Object#`==`().2.
+
+ﬁ(ﬁ (java/lang/String#`<init>`(+2).2+
+
+«/« 1scala/runtime/RichInt#to().2'
+VV org/typelevel/paiges/Doc#2 
+
+¸¸ scala/Tuple2#_2.20
+
+ÈiÈ m org/typelevel/paiges/Doc.text().20
+
+ò1ò 5 org/typelevel/paiges/Doc.text().2)
+
+ÑÑ org/typelevel/paiges/Doc.2
+
+ÓÓ local1762/
+
+òò scala/Predef.ArrowAssoc#`->`().2:
+ ,org/typelevel/paiges/PaigesTest.EquivSyntax#2)
+
+õ,õ /org/typelevel/paiges/Doc.2/
+kk !java/io/PrintWriter#`<init>`(+2).2
+
+ÒÒ local2702
+
+˜˜ local3872D
+
+„,„ /4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2D
+
+†† 4org/typelevel/paiges/PaigesTest#slowRenderTrim().(d)2>
+
+““ .org/typelevel/paiges/PaigesTest.EquivSyntax().2$
+
+èè scala/Predef.String#2
+
+ÎÎ local1652
+
+”” local1462<
+
+’’ ,org/typelevel/paiges/Doc#renderStreamTrim().2
+
+Ù
+Ù local1802/
+
+˜˜ org/typelevel/paiges/Doc.Empty.2
+
+›
+› local1542)
+
+ãã org/typelevel/paiges/Doc.2(
+
+Ì&Ì (java/lang/Object#`==`().2
+vv local742.
+""  org/typelevel/paiges/Doc.text().2
+
+∆∆ local2282/
+
+ΩΩ org/typelevel/paiges/Doc#`+`().2/
+
+¸¸ org/typelevel/paiges/Doc.comma.25
+" $'scala/collection/immutable/List#`::`().27
+
+ÈÈ )'org/typelevel/paiges/Doc.intercalate().2
+
+Î(Î )local2562.
+],] 0 org/typelevel/paiges/Doc#line().2-
+" %scala/collection/immutable/Nil.25
+
+òò %org/typelevel/paiges/Doc#bracketBy().2
+
+¸¸ local1822'
+88 org/typelevel/paiges/Doc.2)
+
+«« org/typelevel/paiges/Doc.2
+
+íRí Slocal4092
+bb local6022
+
+ÕÕ "org/scalatest/Assertions#assert().2'
+b!b $org/typelevel/paiges/Doc#23
+
+Ö%Ö ,#org/typelevel/paiges/Doc#aligned().2
+
+º
+º local2162
+hh java/2
+
+„„ local15924
+
+ﬁﬁ $org/scalatest/Assertions#assert(+1).2
+
+Æ+Æ 0local33020
+
+ï#ï ' org/typelevel/paiges/Doc.text().20
+
+¨¨  scala/collection/immutable/List.2)
+
+„„ org/typelevel/paiges/Doc.20
+
+ú7ú ; org/typelevel/paiges/Doc.text().2
+
+ﬁ	ﬁ 
+local2492)
+
+ΩΩ org/typelevel/paiges/Doc.2#
+
+ππ org/scalacheck/Gen.2
+
+ﬁ3ﬁ 5local3702
+
+ãã local19529
+ +org/typelevel/paiges/PaigesTest#`<init>`().20
+
+ÆÆ  org/typelevel/paiges/Doc.text().2/
+
+ºº org/typelevel/paiges/Doc.empty.2)
+
+ññ org/typelevel/paiges/Doc.2)
+
+Ã5Ã 8org/typelevel/paiges/Doc.2/
+
+ΩΩ org/typelevel/paiges/Doc#`*`().21
+
+ää !scala/collection/Iterator#`++`().2/
+
+˝4˝ 7scala/collection/immutable/Nil.2
+
+˙&˙ *local2732
+oo local662
+
+ØØ local33020
+
+˛˛  org/typelevel/paiges/Doc.fill().2/
+
+ÏÏ org/typelevel/paiges/Doc.Align.27
+
+ö'ö *'scala/collection/TraversableLike#map().2:
+
+ıDı R*org/typelevel/paiges/Doc#representation().2(
+
+ï<ï =scala/StringContext#s().2
+j
+j local672,
+
+¡¡ %org/scalacheck/Gen.choose().2)
+
+àà !org/typelevel/paiges/Doc.2
+
+ÒÒ local2662
+-- 	local162
+
+úú local3112
+c?c @local602'
+bb org/typelevel/paiges/Doc#2/
+
+ãã org/typelevel/paiges/Doc#`*`().2.
+	  org/typelevel/paiges/Generators.2(
+
+∆,∆ .java/lang/Object#`==`().22
+
+¬¬ "org/typelevel/paiges/Doc#nested().2L
+
+ÜÜ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2)
+
+ÀÀ org/typelevel/paiges/Doc#29
+nn +java/io/ByteArrayOutputStream#toString(+1).2%
+
+ﬁ'ﬁ )scala/Boolean#`&&`().2+
+
+ıı scala/runtime/RichInt#to().2(
+
+ùIù Jscala/StringContext#s().20
+;; 
+"org/scalatest/Assertions#assert().20
+
+ÓÓ  org/typelevel/paiges/Doc.text().22
+
+ÚÚ "org/scalatest/FunSuiteLike#test().2)
+
+®® org/typelevel/paiges/Doc.2
+
+ﬁ5ﬁ 9local2412
+ local320
+
+ññ  org/typelevel/paiges/Doc.fill().2
+
+íí local2012
+
+“5“ 6local23724
+
+ıı $org/typelevel/paiges/Doc#maxWidth().2*
+
+ÔÔ scala/Boolean#`unary_!`().2
+ local52#
+
+¸¸ scala/Int#`>=`(+3).2
+mm local682
+
+¸¸ local18222
+
+ˇˇ "org/scalatest/Assertions#assert().20
+
+áá  org/typelevel/paiges/Doc.text().2
+{{ local762.
+]%] ) org/typelevel/paiges/Doc#line().2
+
+ŒŒ local1352
+
+ÎÎ local25622
+
+‰‰ "org/scalatest/Assertions#assert().2/
+
+õCõ Dorg/typelevel/paiges/Doc#`/`().27
+
+«« 'org/typelevel/paiges/Doc.intercalate().2(
+
+Ü)Ü +java/lang/Object#`==`().2)
+
+íí org/typelevel/paiges/Doc.20
+[[ "org/scalatest/FunSuiteLike#test().22
+
+öö 
+"org/scalatest/Assertions#assert().2
+
+èè local932
+
+º5º 6local3402
+
+ï3ï 4local1012
+VV local482(
+
+ÍÍ scala/StringContext#s().2#
+
+«Q« Sscala/Int#`>=`(+3).2
+
+ïï local2992
+
+ıBı Clocal1802
+
+ÛÛ local2722*
+z	z java/io/PrintWriter#close().2
+88  local232$
+
+„„ scala/Predef.String#2
+
+º=º >local3412
+
+ïï local30026
+
+ŒŒ &org/typelevel/paiges/Doc#renderTrim().27
+
+ÃÃ 'org/typelevel/paiges/Doc.intercalate().25
+
+«« *%org/typelevel/paiges/Doc.lineOrSpace.20
+" ""org/scalatest/FunSuite#`<init>`().2$
+
+ü*ü 0scala/Predef.String#2
+
+ê&ê 'local2952
+
+Û)Û *local2722
+pp local702
+
+ÄÄ local1862(
+
+¬)¬ +java/lang/Object#`==`().2
+ scala/Boolean#22
+
+ØØ "org/scalatest/Assertions#assert().2
+
+˘˘ local2772
+
+ä
+ä local1952 
+ scala/util/Random.2 
+ scala/util/Random#2/
+
+É"É %org/typelevel/paiges/Doc.str().2
+
+ΩΩ local3402
+
+’3’ 4local14620
+
+„4„ 8 org/typelevel/paiges/Doc.text().2
+
+ÿÿ local2422)
+
+Ñ%Ñ (org/typelevel/paiges/Doc.2$
+
+îî scala/Predef.String#2'
+99 org/typelevel/paiges/Doc.2
+VV local492
+
+®-® 4local3222/
+
+ÈaÈ dorg/typelevel/paiges/Doc.str().2/
+
+˚˚ org/typelevel/paiges/Doc.Union.20
+66 "org/scalatest/FunSuiteLike#test().2)
+
+†† org/typelevel/paiges/Doc.2D
+
+üü 4org/typelevel/paiges/PaigesTest#slowRenderTrim().(d)2)
+
+¨¨ org/typelevel/paiges/Doc.22
+
+ÃÃ 
+"org/scalatest/Assertions#assert().2
+ll 	local652&
+.. java/lang/Object#`==`().2
+
+‹‹  scala/Char#22
+
+±± "org/scalatest/FunSuiteLike#test().23
+
+ﬁﬁ %#org/typelevel/paiges/Doc#flatten().22
+
+ãã "org/typelevel/paiges/Doc#render().22
+
+êê "org/typelevel/paiges/Doc#render().2)
+
+”” org/typelevel/paiges/Doc#2$
+
+„„ "scala/Predef.String#2
+ll local6627
+
+ïï 'scala/collection/TraversableLike#map().2?
+
+  (/scala/collection/immutable/Stream#mkString(+1).20
+
+„ „ $ org/typelevel/paiges/Doc.char().2)
+
+õEõ Horg/typelevel/paiges/Doc.2
+cMc Nlocal612
+
+ä=ä >local1962H
+
+üü "8org/typelevel/paiges/PaigesTest#slowRenderTrim().(width)2)
+
+ææ org/typelevel/paiges/Doc.22
+
+¸¸ "org/scalatest/Assertions#assert().2(
+
+) +java/lang/Object#`==`().2/
+
+Ã9Ã <org/typelevel/paiges/Doc.str().2'
+		 org/typelevel/paiges/Doc#20
+
+ı1ı 5 org/typelevel/paiges/Doc.text().21
+-E- L#org/typelevel/paiges/Doc#grouped().2/
+
+ññ "org/typelevel/paiges/Doc.comma.2
+
+ÄÄ local3952
+
+õõ local1052)
+
+ÜÜ org/typelevel/paiges/Doc#2'
+\!\ $org/typelevel/paiges/Doc#2>
+
+ÃaÃ i.scala/collection/TraversableOnce#mkString(+1).20
+
+òò  org/typelevel/paiges/Doc.text().2)
+
+–– org/typelevel/paiges/Doc#2>
+
+èè .org/typelevel/paiges/PaigesTest.EquivSyntax().22
+
+˜˜ 
+"org/scalatest/Assertions#assert().23
+
+ÕÕ $#org/typelevel/paiges/Doc#flatten().27
+
+ûVû Y'scala/collection/TraversableLike#map().20
+
+ÖÖ  org/typelevel/paiges/Doc#`+:`().2!
+ org/scalacheck/Gen.2!
+ org/scalacheck/Gen#2/
+
+ôô scala/Predef.ArrowAssoc#`->`().2>
+
+ﬁﬁ .org/typelevel/paiges/PaigesTest.EquivSyntax().2.
+&&  org/typelevel/paiges/Doc.text().2
+
+¿¿ local2162
+
+º º (local33822
+
+ùù "org/typelevel/paiges/Doc#render().2
+
+⁄⁄ local2442
+\\ local552L
+
+îî 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2
+cc local592/
+
+úú scala/Predef.ArrowAssoc#`->`().28
+
+ä;ä <(scala/LowPriorityImplicits#intWrapper().2
+
+ô/ô 0local3032/
+
+ÑÑ org/typelevel/paiges/Doc.empty.22
+
+ÎÎ %"org/typelevel/paiges/Doc#render().2)
+
+ïï org/typelevel/paiges/Doc.2L
+
+€€ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2
+
+¨	¨ 
+local3262
+
+Ï&Ï 'local2572.
+  org/typelevel/paiges/Doc.text().2
+33 local162A
+
+›› #1org/typelevel/paiges/PaigesTest#slowRenderTrim().2L
+
+èè 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).20
+
+ı,ı 0 org/typelevel/paiges/Doc#line().20
+oo "org/typelevel/paiges/Doc#render().2L
+
+—— 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2
+cc local602)
+
+¸¸ org/typelevel/paiges/Doc.2
+
+õ(õ )local1052+
+
+ÉÉ scala/runtime/RichInt#to().2
+
+¨1¨ 2local3272
+nn local6722
+
+´´ "org/scalatest/FunSuiteLike#test().2
+
+ˆˆ scala/Boolean#2)
+
+õõ org/typelevel/paiges/Doc.20
+]] "org/scalatest/Assertions#assert().2<
+
+öcö k,scala/collection/TraversableOnce#mkString().2E
+ 7org/typelevel/paiges/PaigesTest.EquivSyntax#`<init>`().2
+ scala/2
+
+ÛÛ local1802
+
+ÚÚ local2642/
+
+Ø"Ø 'org/typelevel/paiges/Doc.empty.2
+
+¥¥ local1132
+
+ÃÃ local1362?
+
+ö?ö E/scala/collection/immutable/StringLike#format().2-
+W'W (org/typelevel/paiges/Doc#`+`().2:
+
+ﬁ+ﬁ 9*org/typelevel/paiges/Doc#representation().24
+
+’’ $org/scalatest/Assertions#assert(+1).2?
+
+∂#∂ +/scala/collection/immutable/Stream#mkString(+1).2(
+
+öö java/lang/Object#`==`().2
+
+«« local2282
+
+Ω Ω !local3392
+
+¬¬ "local21620
+
+ÌÌ  org/typelevel/paiges/Doc.text().2
+
+¯¯ local2762/
+
+öö org/scalacheck/Gen.frequency().2
+
+®-® 5local41423
+
+¬¬ #org/typelevel/paiges/Doc#grouped().2D
+
+Ø)Ø ,4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2.
+]]  org/typelevel/paiges/Doc#line().2M
+
+ºº 
+=org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+11).2
+
+¯¯ local2732
+
+›› local2492
+
+‹‹ local3692D
+
+éé 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().20
+
+â]â a org/typelevel/paiges/Doc.text().22
+
+ïï "org/scalatest/Assertions#assert().2
+ org/scalatest/2:
+
+õõ *scala/collection/immutable/StringLike#r().2
+
+üü local2052
+
+«#« $local2282/
+
+¨/¨ 0org/typelevel/paiges/Doc#`+`().24
+
+áá $org/typelevel/paiges/Doc#maxWidth().20
+
+ôô  org/typelevel/paiges/Doc.text().2)
+
+ˇˇ org/typelevel/paiges/Doc#2?
+
+◊ ◊ (/scala/collection/immutable/Stream#mkString(+1).22
+
+∆∆ "org/scalatest/FunSuiteLike#test().2
+
+˛˛ local39520
+
+˝'˝ + org/typelevel/paiges/Doc.text().2)
+
+ô.ô 1org/typelevel/paiges/Doc.2<
+
+œœ ,org/typelevel/paiges/Doc#renderStreamTrim().2
+
+ôRô Slocal3032D
+
+ﬂﬂ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().27
+
+˝1˝ 3'scala/collection/immutable/List#`::`().22
+
+í!í '"org/typelevel/paiges/Doc#render().2)
+
+ÿÿ org/typelevel/paiges/Doc#22
+
+ÅÅ "org/scalatest/Assertions#assert().22
+
+øø "org/scalatest/Assertions#assert().2
+
+ÓÓ local26222
+
+ 
+"org/scalatest/Assertions#assert().2
+
+ùù local3112
+
+Ñ/Ñ 4local2842
+
+ôô local3022
+
+àà local1922
+
+‘
+‘ local14820
+
+óó  scala/collection/immutable/List.2)
+
+ÛÛ org/typelevel/paiges/Doc.2.
+
+˜˜ !org/typelevel/paiges/Doc.Line.2
+
+¬)¬ .local2182
+
+ΩΩ local3412
+WW local492/
+
+¢¢ scala/collection/immutable/Nil.22
+
+≈≈ "org/scalatest/FunSuiteLike#test().23
+
+¿1¿ 8#org/typelevel/paiges/Doc#grouped().2
+
+ﬂﬂ local3722
+yy local7522
+
+œœ "org/scalatest/FunSuiteLike#test().2
+
+ûû local31122
+
+ÑÑ "org/scalatest/Assertions#assert().2
+
+ïï local1002(
+
+öFö Gscala/StringContext#s().25
+
+†† )%org/typelevel/paiges/Doc.lineOrSpace.2'
+ "org/typelevel/paiges/Doc#2(
+
+≈≈ java/lang/Object#`==`().2
+
+ã!ã "local1902)
+
+õõ "org/typelevel/paiges/Doc.2
+
+õ9õ :local1052
+ org/scalatest/2.
+-=- ? org/typelevel/paiges/Doc#`:/`().2
+
+˚˚ local28023
+@@ %org/typelevel/paiges/Doc.paragraph().2F
+
+ß4ß ?6scala/collection/immutable/StringLike#stripMargin(+1).2(
+
+œ,œ .java/lang/Object#`==`().2
+
+‰4‰ 5local1592
+@@ 	local3223
+88 %org/typelevel/paiges/Doc.paragraph().2
+
+!
+ (scala/Boolean#2
+
+ñ6ñ 9local2992)
+
+à8à ;org/typelevel/paiges/Doc.2)
+
+åå org/typelevel/paiges/Doc.22
+
+ûû 
+"org/scalatest/Assertions#assert().2.
+]]  org/typelevel/paiges/Doc#line().23
+
+ÈFÈ M#org/typelevel/paiges/Doc#grouped().27
+
+ô)ô ,'scala/collection/TraversableLike#map().2
+
+‘‘ local14720
+
+öö  org/typelevel/paiges/Doc.text().25
+
+ÃÃ *%org/typelevel/paiges/Doc.lineOrSpace.2
+WW local472
+
+µµ local11320
+
+ﬁﬁ  org/typelevel/paiges/Doc.text().22
+
+‘‘ "org/scalatest/FunSuiteLike#test().2
+
+Ø.Ø /local3292"
+
+¨#¨ $scala/Int#`-`(+3).23
+
+«« #org/typelevel/paiges/Doc#grouped().2(
+
+ãã java/lang/Object#`==`().2'
+vv org/typelevel/paiges/Doc#2
+ local42)
+
+   org/typelevel/paiges/Doc.25
+
+ØØ %org/typelevel/paiges/Doc.lineOrSpace.2&
+OO java/lang/Object#`##`().2
+
+ÌÌ local2582
+
+€€ local24520
+QQ "org/scalatest/Assertions#assert().2
+
+ÈÈ local37925
+
+ñ)ñ 4%org/typelevel/paiges/Doc.lineOrSpace.2
+
+ææ local2162
+
+≈/≈ 0local1242
+
+øø local2182<
+WW .org/typelevel/paiges/PaigesTest.EquivSyntax().23
+
+ı>ı E#org/typelevel/paiges/Doc#aligned().2
+
+ºº local2152.
+  org/typelevel/paiges/PaigesTest#22
+
+¬¬ %"org/typelevel/paiges/Doc#render().22
+
+ŒŒ 
+"org/scalatest/Assertions#assert().2L
+
+ÈÈ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2:
+:!: ),scala/collection/TraversableOnce#mkString().27
+ )org/typelevel/paiges/PaigesTest.docEquiv.2
+
+êê local1992
+
+ˆˆ local2742/
+
+ıı org/typelevel/paiges/Doc#`+`().2<
+
+Ü6Ü >,scala/collection/TraversableOnce#mkString().23
+
+ΩΩ #org/typelevel/paiges/Doc#grouped().2
+
+ÎÎ local1642?
+
+ôAô G/scala/collection/immutable/StringLike#format().2
+
+ˇ%ˇ &local2822B
+c-c 04org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2)
+
+ØØ org/typelevel/paiges/Doc.2
+
+¡1¡ 2local3452>
+
+ÅÅ .org/typelevel/paiges/PaigesTest.EquivSyntax().2
+
+íOí Plocal4082
+77 local2322
+
+®® 
+"org/scalatest/Assertions#assert().2/
+
+ñ#ñ $org/typelevel/paiges/Doc#`+`().2>
+
+ß	ß .scala/collection/TraversableOnce#mkString(+1).2(
+
+÷÷ 	scala/StringContext#s().20
+
+⁄⁄  org/typelevel/paiges/Doc.Concat.2
+::  local2320
+
+¡¡  org/scalacheck/Gen.identifier().2
+
+ÌÌ local2592&
+pp java/lang/Object#`==`().2>
+
+„„ .org/typelevel/paiges/PaigesTest.EquivSyntax().2
+k
+k local682
+
+‹‹ scala/Char#2&
+&E& Gjava/lang/Object#`==`().2
+
+ﬁ/ﬁ 1local3692
+
+›› local36920
+
+˝˝  org/typelevel/paiges/Doc.text().20
+tt "org/scalatest/FunSuiteLike#test().2
+
+’@’ Elocal1482
+
+êê local2002
+
+∂/∂ 7local1142?
+
+œ#œ +/scala/collection/immutable/Stream#mkString(+1).2
+
+óó local4132>
+
+ÉÉ .org/typelevel/paiges/PaigesTest.EquivSyntax().2
+uu java/22
+
+èè "org/scalatest/Assertions#assert().2
+
+ΩΩ local2142
+
+ØØ local3292
+c1c 2local592L
+
+öö 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+7).23
+
+ºº #org/typelevel/paiges/Doc#flatten().2
+
+´´ local3272
+
+““ local23720
+&-& 3"org/typelevel/paiges/Doc#nested().22
+
+““ "org/scalatest/FunSuiteLike#test().2.
+--- / org/typelevel/paiges/Doc#`:/`().23
+
+¿¿ #org/typelevel/paiges/Doc#grouped().2
+
+´´ 
+scala/Int#20
+?? "org/scalatest/FunSuiteLike#test().2
+
+ææ local2142
+
+ºº local3382#
+
+ö3ö 6org/scalacheck/Gen.22
+
+íí "org/typelevel/paiges/Doc#render().2,
+jj *java/io/ByteArrayOutputStream#2)
+
+öö org/typelevel/paiges/Doc.2(
+
+ﬁﬁ java/lang/Object#`==`().2
+
+ÏÏ local1652)
+
+ÂÂ org/typelevel/paiges/Doc.2
+ local42
+
+†† local11025
+ 'scala/collection/immutable/List#`::`().2
+
+ÍÍ local3792
+
+˚˚ local18222
+
+ƒƒ 
+"org/scalatest/Assertions#assert().2)
+
+ää org/typelevel/paiges/Doc.2
+
+üü local4142/
+
+öö scala/Predef.ArrowAssoc#`->`().2(
+
+˜˜ java/lang/Object#`==`().2
+
+ΩΩ #local2162)
+
+üü org/typelevel/paiges/Doc#2D
+
+¿!¿ $4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2)
+
+òò org/typelevel/paiges/Doc.2
+
+Ñ!Ñ "local832/
+
+øø org/typelevel/paiges/Doc.empty.2
+QQ local362
+
+˚˚ local2812%
+ !org/scalatest/FunSuite#2
+
+ƒƒ local12424
+
+÷÷ $org/typelevel/paiges/Doc#maxWidth().2
+
+ö-ö .local3072
+
+ÛÛ (local25222
+
+ÅÅ "org/scalatest/FunSuiteLike#test().2<
+
+ôWô _,scala/collection/TraversableOnce#mkString().27
+j*j *)java/io/ByteArrayOutputStream#`<init>`().2-
+
+•• scala/Predef.augmentString().2
+{
+{ local782"
+		 scala/package.Equiv#2&
+QQ java/lang/Object#`##`().2
+
+˙+˙ ,local2792(
+
+ƒƒ java/lang/Object#`==`().2?
+
+—.— 6/scala/collection/immutable/Stream#mkString(+1).2>
+
+ΩΩ .org/typelevel/paiges/PaigesTest.EquivSyntax().2(
+
+Ó&Ó (java/lang/Object#`==`().2-
+
+¬-¬ .scala/Predef.augmentString().2<
+
+¬/¬ 0,scala/collection/immutable/StringLike#`*`().2
+
+°° 	local11022
+
+ã#ã )"org/typelevel/paiges/Doc#render().20
+
+ªª 
+ scala/collection/immutable/List.2)
+
+€€ org/typelevel/paiges/Doc#22
+
+¨5¨ ;"org/typelevel/paiges/Doc#render().2)
+
+ªª org/typelevel/paiges/Doc#20
+
+ú(ú , org/typelevel/paiges/Doc.text().23
+
+ÎÎ #org/typelevel/paiges/Doc#space(+1).2.
+
+˛˛ #org/typelevel/paiges/Doc.line.2(
+
+õ6õ 8java/lang/Object#`==`().2
+}} local792
+
+ù0ù 1local3122
+
+ÑÑ local2852
+
+öPö Qlocal30720
+
+ÈÈ  org/typelevel/paiges/Doc.text().22
+
+ÎÎ "org/scalatest/Assertions#assert().2
+
+Ì)Ì ,local1662
+
+˙˙ local27929
+
+““ *)org/typelevel/paiges/Doc#flattenOption().22
+
+““ "org/scalatest/Assertions#assert().2
+
+ı(ı )local1802(
+
+¥¥ java/lang/Object#`==`().2
+ 
+scala/Int#2
+
+⁄ ⁄ !local2432"
+xx java/io/PrintWriter#2)
+
+˚˚ org/typelevel/paiges/Doc#2'
+
+íMí Njava/lang/String#`+`().2
+
+ˆ ˆ !local27420
+.. 
+"org/scalatest/Assertions#assert().2L
+
+ªª 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2+
+
+ÈRÈ Tscala/runtime/RichInt#to().2
+
+ÀÀ 	local1352.
+
+¯¯ org/typelevel/paiges/Doc.Nest.2/
+
+õõ scala/Predef.ArrowAssoc#`->`().2
+# $local12
+
+ªª local2152(
+
+ÅÅ java/lang/Object#`==`().2&
+33 java/lang/Object#`==`().2(
+
+ûGû Hscala/StringContext#s().2
+NN local3722
+
+‚‚ "org/scalatest/FunSuiteLike#test().22
+
+ÖÖ "org/scalatest/FunSuiteLike#test().2
+bb local592
+
+œœ local1352
+W%W &local482
+
+⁄+⁄ ,local2442)
+
+«>« Aorg/typelevel/paiges/Doc.2)
+
+úú org/typelevel/paiges/Doc.2 
+! 'scala/util/Random.2
+
+ífí nlocal4062(
+
+í,í -scala/StringContext#s().2
+
+ÉÉ local832
+
+©© local32427
+! ))org/typelevel/paiges/PaigesTest.docEquiv.2
+
+–– local35922
+
+ı*ı 0"org/typelevel/paiges/Doc#render().2
+ii 
+scala/Int#2)
+
+º0º 3org/typelevel/paiges/Doc#2
+
+É!É "local8322
+
+≈≈ 
+"org/scalatest/Assertions#assert().25
+ !'scala/collection/immutable/List#`::`().2?
+
+ùBù H/scala/collection/immutable/StringLike#format().20
+
+†G† K org/typelevel/paiges/Doc.text().22
+
+≤≤ "org/scalatest/FunSuiteLike#test().22
+
+   "org/scalatest/FunSuiteLike#test().2
+w
+w local762
+]] local552L
+
+êê 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).22
+
+◊.◊ 4"org/typelevel/paiges/Doc#render().2
+
+ÿÿ scala/Boolean#2
+
+Ã\Ã `local3542
+
+ππ local3352J
+vv 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).22
+
+´´ "org/scalatest/FunSuiteLike#test().20
+
+ıı  org/typelevel/paiges/Doc.text().2
+
+¿.¿ /local21420
+9.9 4"org/typelevel/paiges/Doc#nested().2)
+
+Ø'Ø *org/typelevel/paiges/Doc.2(
+
+ã-ã /java/lang/Object#`==`().2
+
+¯¯ local2752
+yy 	local742J
+NN 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).20
+
+à<à @ org/typelevel/paiges/Doc.text().2)
+
+ØØ !org/typelevel/paiges/Doc.2/
+
+¨¨ org/typelevel/paiges/Doc.cat().2
+
+
+ local22'
+
+ö^ö _java/lang/String#`+`().2(
+
+®*® ,java/lang/Object#`==`().2
+
+∆∆ local12422
+
+àà "org/typelevel/paiges/Doc#render().2
+
+ local2692"
+
+‘‘ scala/Int#`&`(+3).2
+
+Ø2Ø 7local33022
+
+∆∆ 
+"org/scalatest/Assertions#assert().2 
+
+¸7¸ 9scala/Tuple2#_2.2
+Q
+Q local362/
+
+ô,ô -org/typelevel/paiges/Doc#`/`().2(
+
+ÃYÃ [java/lang/Object#`==`().20
+,, "org/scalatest/FunSuiteLike#test().2
+
+ÎÎ local2552
+n
+n local692D
+
+ΩΩ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2<
+
+ ,org/typelevel/paiges/Doc#renderWideStream().2L
+
+ââ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+3).26
+
+ÕÕ &org/typelevel/paiges/Doc#renderTrim().2)
+
+ôô org/typelevel/paiges/Doc.2/
+
+È/È 4org/typelevel/paiges/Doc.comma.2'
+ org/typelevel/paiges/Doc#2
+
+ä3ä 4local1962/
+
+›› org/typelevel/paiges/Doc#`+`().22
+
+ãã 
+"org/scalatest/Assertions#assert().2
+
+ÁÁ local25220
+
+ÖÖ  org/typelevel/paiges/Doc#`:+`().2&
+AA java/lang/Object#`==`().22
+
+⁄⁄ "org/scalatest/FunSuiteLike#test().2
+bb local612
+
+òò local3022
+
+∂∂ local1132 
+ java/lang/Integer#2(
+
+ôô java/lang/Object#`==`().2
+
+êê local29527
+
+˝$˝ &'scala/collection/immutable/List#`::`().26
+
+§§ &scala/collection/immutable/List#map().2&
+"8" :java/lang/Object#`==`().2
+
+ññ local3012
+
+öö local3022
+
+ÌÌ local16520
+MM "org/scalatest/FunSuiteLike#test().29
+{{ +java/io/ByteArrayOutputStream#toString(+1).2
+
+à
+à local1932)
+
+’’ org/typelevel/paiges/Doc#2+
+
+ô"ô $scala/runtime/RichInt#to().2(
+
+ÄÄ java/lang/Object#`==`().2
+
+Ó*Ó +local25826
+
+ƒƒ &org/typelevel/paiges/Doc#renderTrim().26
+
+‹‹ &org/typelevel/paiges/Doc#renderTrim().2.
+
+ŸŸ !org/typelevel/paiges/Doc.Line.2
+
+ªª local2142#
+
+¡¡ org/scalacheck/Gen.2(
+
+‰*‰ ,java/lang/Object#`==`().27
+
+Ã1Ã 4'scala/collection/TraversableLike#map().2:
+
+í2í @*org/typelevel/paiges/Doc#representation().2-
+
+π%π ,org/scalacheck/Gen#flatMap().2'
+VV org/typelevel/paiges/Doc#26
+
+’5’ ?&org/typelevel/paiges/Doc#renderTrim().2
+
+ÏÏ local1642
+
+ää local902
+
+÷
+÷ local36520
+UU "org/scalatest/FunSuiteLike#test().2)
+
+›› "org/typelevel/paiges/Doc.22
+
+ÌÌ ""org/typelevel/paiges/Doc#render().2<
+8!8 ).scala/collection/TraversableOnce#mkString(+1).2)
+
+† † %java/lang/String#split().2
+pp local6920
+;; "org/typelevel/paiges/Doc#render().2
+
+˙˙ local2732
+
+€€ local2412&
+
+ëë scala/Int#`unary_-`().22
+
+ÖÖ "org/scalatest/FunSuiteLike#test().22
+
+èè "org/scalatest/FunSuiteLike#test().2-
+99 org/typelevel/paiges/Doc#`+`().2
+
+‹‹ local2472
+
+¬¬ local3452
+
+Á!Á (scala/Boolean#22
+
+ππ "org/scalatest/FunSuiteLike#test().22
+
+ÌÌ "org/scalatest/Assertions#assert().2<
+
+ùXù `,scala/collection/TraversableOnce#mkString().2(
+
+∂,∂ .java/lang/Object#`==`().2
+
+ï9ï :local1002'
+\\ org/typelevel/paiges/Doc#2)
+
+∆∆ org/typelevel/paiges/Doc#2>
+
+ÑÑ .org/typelevel/paiges/PaigesTest.EquivSyntax().2
+
+√√ local1252
+
+ÆÆ local3242
+
+∫∫ local3382<
+
+ÜÜ ,org/typelevel/paiges/Doc#renderWideStream().23
+
+ÅÅ #org/typelevel/paiges/Doc#isEmpty().2D
+ $6org/typelevel/paiges/PaigesTest#generatorDrivenConfig.2
+
+Œ/Œ 0local1352
+
+π-π 4local33622
+
+ÓÓ ""org/typelevel/paiges/Doc#render().2
+
+˛%˛ 'local39122
+
+ˇˇ "org/scalatest/FunSuiteLike#test().20
+gg "org/scalatest/FunSuiteLike#test().2
+
+ùSù Tlocal3122
+|| local752
+88 
+local242F
+
+êHê S6scala/collection/immutable/StringLike#stripMargin(+1).2
+ local32
+
+ØØ local3252
+
+œ/œ 7local1362
+
+ﬁ)ﬁ *local1522
+
+ãã local2862
+
+∑∑ &local3342/
+
+Ø0Ø 1org/typelevel/paiges/Doc#`*`().2
+
+ÀÀ local3542&
+QQ java/lang/Object#`==`().2
+
+¿&¿ +local2162/
+
+â=â >org/typelevel/paiges/Doc#`/`().2)
+
+ññ org/typelevel/paiges/Doc.2)
+
+‰‰ org/typelevel/paiges/Doc.2
+
+öLö Mlocal3072
+xx #local762)
+
+üü org/typelevel/paiges/Doc.2.
+
+ÀÀ org/typelevel/paiges/Doc.Text.26
+
+†?† B&scala/collection/immutable/List#map().20
+pp "org/scalatest/Assertions#assert().2
+
+˙˙ local2782)
+
+â%â (org/typelevel/paiges/Doc.2D
+
+ÉÉ  4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+o
+o local7020
+OO "org/scalatest/Assertions#assert().22
+
+éé "org/scalatest/Assertions#assert().20
+
+¨/¨ 3 org/typelevel/paiges/Doc.text().2
+
+í;í <local4082#
+
+ââ org/scalacheck/Gen.2,
+
+®® org/scalacheck/Gen.choose().2)
+
+˛˛ org/typelevel/paiges/Doc.27
+
+ÈYÈ \'scala/collection/TraversableLike#map().2.
+
+ÎÎ org/typelevel/paiges/Doc.Nest.2)
+
+È]È `org/typelevel/paiges/Doc.2J
+VV 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+9).20
+
+ÓÓ  org/typelevel/paiges/Doc#`&:`().2
+ii local652$
+
+ÈÈ scala/Predef.String#2/
+
+Ω"Ω #org/typelevel/paiges/Doc#`*`().2.
+	  org/typelevel/paiges/PaigesTest.2D
+
+ﬁﬁ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2J
+\\ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+9).2
+
+ˇ ˇ $local27320
+
+ØØ  org/typelevel/paiges/Doc.text().2)
+
+´´ org/typelevel/paiges/Doc#2)
+
+´*´ -org/typelevel/paiges/Doc#2.
+  org/typelevel/paiges/PaigesTest.22
+
+íí 
+"org/scalatest/Assertions#assert().2)
+
+›› org/typelevel/paiges/Doc.2(
+
+¨@¨ Bjava/lang/Object#`==`().27
+w*w *)java/io/ByteArrayOutputStream#`<init>`().20
+AA "org/typelevel/paiges/Doc#render().22
+
+àà "org/scalatest/FunSuiteLike#test().2
+
+¸¸ local2812L
+
+ßß  <org/scalatest/prop/Configuration#PropertyCheckConfiguration.2
+
+îî 
+scala/Int#2
+
+ã*ã +local19723
+
+ææ %#org/typelevel/paiges/Doc#grouped().2/
+
+ŸŸ org/typelevel/paiges/Doc.Empty.22
+
+ÍÍ "org/typelevel/paiges/Doc#render().2
+ 
+org/20
+
+¸¸ " org/typelevel/paiges/Doc.fill().2
+
+ãã  local9022
+
+ØØ 
+"org/scalatest/Assertions#assert().22
+
+ìì "org/scalatest/FunSuiteLike#test().2:
+
+úú #*org/typelevel/paiges/Doc#tightBracketBy().22
+
+˚˚ "org/scalatest/FunSuiteLike#test().24
+|| &org/typelevel/paiges/Doc#renderTrim().2
+
+ÕÕ local23322
+
+ÄÄ 
+"org/scalatest/Assertions#assert().2A
+
+üü 1org/typelevel/paiges/PaigesTest#slowRenderTrim().2)
+
+¿¿ org/typelevel/paiges/Doc.22
+
+µµ 
+"org/scalatest/Assertions#assert().2L
+
+„„ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2"
+
+ëë scala/Int#`>`(+3).2"
+kk java/io/PrintWriter#20
+"" "org/scalatest/Assertions#assert().2'
+* /scala/math/Equiv#equiv().2
+
+⁄⁄ local2432)
+
+ÛÛ org/typelevel/paiges/Doc#22
+
+ÊÊ "org/scalatest/FunSuiteLike#test().2
+  local52)
+
+ÉÉ !org/typelevel/paiges/Doc.23
+
+«%« ,#org/typelevel/paiges/Doc#flatten().2
+
+®® local2062D
+
+ÑÑ  4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+ÜÜ "
+scala/Int#2
+
+ÍÍ local1652
+
+†† local2062
+vv local752
+
+í>í ?local4092?
+
+û@û F/scala/collection/immutable/StringLike#format().20
+
+ô2ô 6 org/typelevel/paiges/Doc.text().2
+
+ﬁ*ﬁ .local2412
+
+Ó)Ó ,local16624
+
+ıı $org/scalatest/Assertions#assert(+1).2
+
+ local3792&
+:: java/lang/Object#`==`().2)
+
+ú3ú 6org/typelevel/paiges/Doc.2
+AA local322
+
+∆/∆ 7local12520
+
+„„  org/typelevel/paiges/Doc.char().2
+
+„„ local15823
+
+ÃÃ #org/typelevel/paiges/Doc#flatten().2)
+
+ˆˆ org/typelevel/paiges/Doc#2
+
+ÍÍ local2542
+
+õ3õ 4local10622
+
+ÏÏ "org/scalatest/Assertions#assert().2
+
+€€ local1522.
+
+Ñ)Ñ -org/typelevel/paiges/Doc.line.2
+
+‹
+‹ local1532(
+
+ŒŒ java/lang/Object#`==`().22
+
+ãã "org/scalatest/Assertions#assert().2+
+
+ÀÀ scala/runtime/RichInt#to().2
+
+ÎÎ 'local2522&
+Q#Q %java/lang/Object#`##`().2
+
+ﬁ/ﬁ 0local24920
+
+ÜÜ  scala/collection/immutable/List.2*
+
+Í Í &java/lang/String#length().2#
+
+®® org/scalacheck/Gen.22
+
+∂∂ 
+"org/scalatest/Assertions#assert().2D
+
+““ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+
+ local122
+
+—— "org/scalatest/Assertions#assert().20
+
+êê  org/typelevel/paiges/Doc.text().2
+
+‰‰ local1602
+
+ÏÏ %local2522)
+
+øø org/typelevel/paiges/Doc.2
+
+îî local1002/
+
+ï%ï *org/typelevel/paiges/Doc.space.2
+
+Å
+Å local18620
+
+ÌÌ  org/typelevel/paiges/Doc#`:&`().2(
+
+ı>ı ?scala/StringContext#s().2
+
+¬¬ local2172,
+ww *java/io/ByteArrayOutputStream#20
+aa "org/scalatest/FunSuiteLike#test().2J
+ <org/scalatest/prop/Configuration#PropertyCheckConfiguration.20
+%% "org/scalatest/FunSuiteLike#test().2)
+
+ú$ú 'org/typelevel/paiges/Doc.2
+QQ local372
+
+¡4¡ 5local3462/
+
+Å&Å +org/typelevel/paiges/Doc.empty.2B
+]] "4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().22
+
+õ[õ a"org/typelevel/paiges/Doc#nested().2J
+ii 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2)
+
+ÆÆ org/typelevel/paiges/Doc.22
+
+¬¬ "org/scalatest/Assertions#assert().22
+
+ï,ï 2"org/typelevel/paiges/Doc#render().2/
+
+¬/¬ 0org/typelevel/paiges/Doc#`+`().2/
+
+¿,¿ -org/typelevel/paiges/Doc#`+`().25
+cAc L'org/typelevel/paiges/Doc#lineOrSpace().2'
+
+
+ org/typelevel/paiges/Doc#2
+
+á
+á local19223
+
+ãã #scala/collection/Iterator#forall().2)
+
+†† org/typelevel/paiges/Doc.2F
+
+¯,¯ 76scala/collection/immutable/StringLike#stripMargin(+1).22
+
+ÜÜ 
+"org/scalatest/Assertions#assert().2
+
+ÇÇ local3952)
+
+†C† Forg/typelevel/paiges/Doc.2
+
+◊◊ local3642.
+--  org/typelevel/paiges/Doc.text().2
+
+Ω)Ω *local3412
+
+·· local2502)
+
+—— org/typelevel/paiges/Doc#2D
+
+«« "4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+ﬁﬁ local15320
+
+ö"ö , org/scalacheck/Gen.identifier().2)
+
+ï!ï $org/typelevel/paiges/Doc.2L
+
+·· 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2>
+
+éé .org/typelevel/paiges/PaigesTest.EquivSyntax().2)
+
+ÃÃ org/typelevel/paiges/Doc.2)
+
+ÁÁ org/typelevel/paiges/Doc#2
+zz local7720
+
+††  org/typelevel/paiges/Doc.fill().2
+
+ÖÖ local2852
+
+ÈÈ local1642(
+
+Î)Î +java/lang/Object#`==`().2+
+
+ââ scala/runtime/RichInt#to().2
+
+›(› *local3702
+
+ÜÜ local2862
++ ,local22
+
+ÃÃ local23221
+
+ïï !org/typelevel/paiges/Doc.split().21
+
+∫∫ !org/typelevel/paiges/Doc.stack().2
+
+Á1Á 2local2532,
+
+öIö Oorg/scalacheck/Gen.choose().2D
+
+¬$¬ '4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+
+˙ ˙ !local27820
+
+››  org/typelevel/paiges/Doc.char().23
+
+¬8¬ ?#org/typelevel/paiges/Doc#grouped().2
+
+ΩΩ local3392-
+WW org/typelevel/paiges/Doc#`+`().2
+
+®® local4132
+ll local682
+
+ıı local1802
+
+àà local19020
+33 "org/typelevel/paiges/Doc#render().2
+
+æ
+æ local21822
+
+ÄÄ "org/typelevel/paiges/Doc#render().22
+
+†† "org/typelevel/paiges/Doc#render().2
+
+¬1¬ 6local2162
+
+ÉÉ local2842
+
+ÓÓ )local2522
+0 8local32
+
+¸ ¸ .local25220
+WW "org/scalatest/Assertions#assert().2(
+
+ÇÇ java/lang/Object#`==`().2
+
+‹‹ local1522
+
+¿¿ local2142)
+
+È+È .org/typelevel/paiges/Doc.2/
+
+ÛÛ org/typelevel/paiges/Doc.Union.2:
+
+÷÷ "*org/typelevel/paiges/Doc#representation().2
+
+¢¢ 
+scala/sys/2#
+
+öö !org/scalacheck/Gen.2
+.. local1626
+
+í/í 2&scala/collection/immutable/List#map().2*
+		 java/lang/Object#`<init>`().20
+
+õkõ o org/typelevel/paiges/Doc.text().2
+
+–– local3602
+
+Á*Á -
+scala/Int#2
+
+ûMû Nlocal3162
+
+ÀÀ local2322
+\\ local542
+
+‹‹ local37024
+
+ﬁ<ﬁ @$org/typelevel/paiges/Doc.Union#bDoc.2
+|| local742
+
+äDä Elocal1922
+
+Ω%Ω &local3402
+
+ﬁ)ﬁ .scala/Array.2+
+
+ïï scala/runtime/RichInt#to().22
+
+‰ ‰ &"org/typelevel/paiges/Doc#render().2.
+
+˜˜ org/typelevel/paiges/Doc.Text.2)
+
+Æ&Æ )org/typelevel/paiges/Doc#2
+
+ùOù Plocal3122+
+
+Ü/Ü 1scala/runtime/RichInt#to().2
+x
+x local772/
+
+È5È 6org/typelevel/paiges/Doc#`+`().20
+
+≠≠ 
+ scala/collection/immutable/List.2.
+
+ËË org/typelevel/paiges/Doc.Line.2
+99 local242
+PP local372/
+
+ææ org/typelevel/paiges/Doc#`+`().2$
+
+ÈÈ "scala/Predef.String#2
+
+ÿÿ local2412
+oo local6524
+
+ﬁﬁ $org/typelevel/paiges/Doc.Union#bDoc.2
+
+”” !
+scala/Int#2
+
+⁄⁄ local24122
+
+…… "org/scalatest/FunSuiteLike#test().2>
+
+ﬂﬂ .org/typelevel/paiges/PaigesTest.EquivSyntax().22
+
+◊◊ "org/scalatest/Assertions#assert().2'
+NN org/typelevel/paiges/Doc#2)
+
+â?â Borg/typelevel/paiges/Doc.2L
+
+∆∆ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2(
+
+’0’ 2java/lang/Object#`==`().20
+&& 
+"org/scalatest/Assertions#assert().2<
+
+6 >,scala/collection/TraversableOnce#mkString().26
+
+¥¥ &org/typelevel/paiges/Doc#renderTrim().20
+
+õIõ M org/typelevel/paiges/Doc.text().20
+
+˝˝  org/typelevel/paiges/Doc.text().2&
+ "java/lang/Integer#max().2(
+
+ÍÍ java/lang/Object#`==`().2
+
+º8º ;
+scala/Int#2"
+
+ÒÒ scala/Int#`+`(+4).2
+
+—— local2372
+
+®® local3212,
+( /scala/util/Random#nextInt(+1).2(
+
+ûû java/lang/Object#`==`().2H
+
+†† 8org/typelevel/paiges/PaigesTest#slowRenderTrim().(width)2(
+
+Ï+Ï -java/lang/Object#`==`().2<
+
+Ã?Ã O,org/typelevel/paiges/Doc#renderWideStream().22
+
+ﬂﬂ "org/scalatest/Assertions#assert().2
+99 
+local252
+
+ÕÕ local1352
+]1] 2local552
+
+∫∫ 	local12422
+
+˙˙ "org/scalatest/FunSuiteLike#test().2,
+
+∫∫ org/scalacheck/Gen.choose().20
+:: "org/typelevel/paiges/Doc#render().2&
+OO java/lang/Object#`##`().2
+
+´´ local3262/
+
+ÈÈ org/typelevel/paiges/Doc#`+`().2)
+
+ÇÇ org/typelevel/paiges/Doc#20
+
+ä-ä 0 scala/collection/Iterator#map().2)
+
+¨+¨ .org/typelevel/paiges/Doc.2A
+
+Œ Œ .1org/typelevel/paiges/PaigesTest#slowRenderTrim().2
+
+–– 
+scala/Int#2
+ scala/util/2(
+
+◊)◊ +java/lang/Object#`==`().2L
+
+”” 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2
+
+í0í 1local19922
+1 9$org/typelevel/paiges/Doc#maxWidth().2#
+
+©© org/scalacheck/Gen.2
+
+¬¬ local3462+
+
+ù#ù %scala/runtime/RichInt#to().22
+% -$org/typelevel/paiges/Doc#maxWidth().2B
+ 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2
+ 
+org/2
+
+Ω
+Ω local2172#
+
+öEö Horg/scalacheck/Gen.2#
+
+¨¨ scala/Int#`<=`(+3).2?
+
+ï5ï ;/scala/collection/immutable/StringLike#format().20
+ ("org/scalatest/prop/PropertyChecks.2(
+
+ôHô Iscala/StringContext#s().2
+
+ïBï Clocal3002
+
+ÈÈ local1652/
+
+õ)õ *org/typelevel/paiges/Doc#`/`().20
+
+¬¬  org/typelevel/paiges/Doc.text().22
+
+õõ "org/scalatest/Assertions#assert().2-
+&& org/typelevel/paiges/Doc#`+`().2
+
+ƒ ƒ (local1252%
+
+¸¸ scala/Boolean#`==`().2
+
+ä ä "local19122
+
+«« "org/scalatest/Assertions#assert().2"
+
+Ω'Ω (scala/Int#`*`(+3).2>
+
+®® .org/typelevel/paiges/PaigesTest.EquivSyntax().2L
+
+ÇÇ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).2
+c*c +local612!
+ scala/Int#`==`(+3).2
+
+µ/µ 0local1132&
+}} java/lang/Object#`==`().2.
+
+€€ org/typelevel/paiges/Doc.Nest.26
+
+¨'¨ *&scala/collection/immutable/List#map().20
+cc "org/scalatest/Assertions#assert().23
+
+¸¸ %#org/typelevel/paiges/Doc#isEmpty().2
+
+ÜÜ local19125
+3 5'scala/collection/immutable/List#`::`().2
+
+´´ "local3282
+hh java/io/2(
+
+ící ejava/lang/Object#`==`().24
+
+íí $org/scalatest/Assertions#assert(+1).2*
+m	m java/io/PrintWriter#close().2
+W W !local472
+OO local3622
+
+ﬁ<ﬁ B"org/typelevel/paiges/Doc#render().20
+
+ãã  org/typelevel/paiges/Doc.text().2L
+
+–– 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+5).2
+ org/2&
+;; java/lang/Object#`==`().22
+
+≤≤ "org/typelevel/paiges/Doc#nested().2/
+
+à6à 7org/typelevel/paiges/Doc#`/`().2
+
+ local2682
+
+§§ local1112
+
+ﬁﬁ local15420
+
+õõ  org/typelevel/paiges/Doc.text().2
+% 0local42)
+
+Å"Å %org/typelevel/paiges/Doc.20
+AA 
+"org/scalatest/Assertions#assert().22
+
+îî "org/scalatest/FunSuiteLike#test().2'
+\\ org/typelevel/paiges/Doc#2
+
+ä9ä :local1922:
+
+ïï *scala/collection/immutable/StringLike#r().2
+
+ä
+ä local912>
+  0org/typelevel/paiges/PaigesTest.EquivSyntax#lhs.22
+
+ΩΩ "org/scalatest/Assertions#assert().2?
+
+ÃPÃ X/scala/collection/immutable/Stream#mkString(+1).2
+
+¨¨  local3252
+
+îî local1012
+kk #local672
+OO local362
+WW local482*
+
+¢¢ scala/sys/package.error().2
+
+ûQû Rlocal3162(
+
+—— java/lang/Object#`==`().2
+NN local3622
+
+ÓÓ "org/scalatest/Assertions#assert().2
+
+ıı 
+local3872/
+
+ææ org/typelevel/paiges/Doc.empty.22
+
+ùù 
+"org/scalatest/Assertions#assert().2
+
+¸¸ local2522
+vv 
+scala/Int#2
+ org/scalacheck/20
+
+ÏÏ  org/typelevel/paiges/Doc.text().2/
+
+ÉÉ org/typelevel/paiges/Doc.empty.2-
+"" org/typelevel/paiges/Doc#`+`().24
+
+¸¸ $org/typelevel/paiges/Doc#nonEmpty().2-
+
+•
+• scala/Predef.augmentString().2
+
+Í
+Í local16620
+:: 
+"org/scalatest/Assertions#assert().2)
+
+ñ%ñ (org/typelevel/paiges/Doc.2
+
+úú local3012
+
+ÒÒ local2712
+
+å
+å local9322
+
+ññ "org/scalatest/FunSuiteLike#test().20
+}} "org/scalatest/Assertions#assert().2!
+ org/scalatest/prop/2
+
+‹‹ local24722
+
+¥¥ 
+"org/scalatest/Assertions#assert().2/
+
+âWâ Xorg/typelevel/paiges/Doc#`/`().2)
+
+È7È :org/typelevel/paiges/Doc.2
+
+Î,Î /local16622
+
+ää "org/typelevel/paiges/Doc.spaces().2
+
+˝˝ 
+local3912'
+V!V $org/typelevel/paiges/Doc#2
+
+º@º C
+scala/Int#2/
+
+∞∞ org/typelevel/paiges/Doc.empty.2
+
+áá local2912
+
+ãã local40622
+
+‰‰ "org/scalatest/FunSuiteLike#test().2(
+
+ÕÕ java/lang/Object#`==`().2)
+
+¬¬ org/typelevel/paiges/Doc.2L
+
+∏∏  <org/scalatest/prop/Configuration#PropertyCheckConfiguration.2/
+
+¬¬ org/typelevel/paiges/Doc#`*`().2
+
+ÓÓ local26122
+
+ÍÍ 
+"org/scalatest/Assertions#assert().2G
+ 9org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().(rhs)27
+ )org/typelevel/paiges/Doc.equivAtWidths().2
+
+ÇÇ local8321
+
+¨¨ !org/typelevel/paiges/Doc.stack().2/
+
+Ñ#Ñ $org/typelevel/paiges/Doc#`+`().2:
+;#; +,scala/collection/TraversableOnce#mkString().2)
+
+´$´ 'org/typelevel/paiges/Doc#22
+
+÷%÷ +"org/typelevel/paiges/Doc#render().24
+
+®® $org/typelevel/paiges/Doc.tabulate().2
+
+íí local1992
+
+òò local3012
+
+ 'local2522
+
+Õ Õ (local1362G
+5 89org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().(rhs)2
+
+¯¯ local27622
+
+¿¿ "org/scalatest/FunSuiteLike#test().2)
+
+ÄÄ org/typelevel/paiges/Doc#27
+
+ı!ı ''scala/collection/IterableLike#forall().2,
+99 org/typelevel/paiges/Doc.line.2'
+@@ org/typelevel/paiges/Doc.2D
+
+èè 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2#
+
+ÜÜ scala/package.List#21
+-%- ,#org/typelevel/paiges/Doc#grouped().2)
+
+ºº org/typelevel/paiges/Doc.2<
+
+ûdû l,scala/collection/TraversableOnce#mkString().2
+
+ëë local2002(
+
+µµ java/lang/Object#`==`().20
+
+åå  org/typelevel/paiges/Doc.text().2
+
+â$â %local902'
+ii org/typelevel/paiges/Doc#2.
+&&  org/typelevel/paiges/Doc.text().25
+cc )'org/typelevel/paiges/Doc#lineOrSpace().20
+
+õ#õ ' org/typelevel/paiges/Doc.text().2)
+
+«« org/typelevel/paiges/Doc.22
+
+ÅÅ "org/typelevel/paiges/Doc#render().2L
+
+ˇˇ 
+<org/scalatest/prop/GeneratorDrivenPropertyChecks#forAll(+1).20
+.. "org/typelevel/paiges/Doc#render().2)
+
+ØØ org/typelevel/paiges/Doc.2
+]#] $local532
+
+·%· &local2502)
+
+ÑÑ org/typelevel/paiges/Doc.2
+
+Ã,Ã 0local3542
+
+
+
+ local02!
+PP scala/Int#`==`(+3).2/
+
+›› org/typelevel/paiges/Doc.Union.2
+
+ãã #local2912)
+
+áá org/typelevel/paiges/Doc.2
+
+⁄&⁄ *local2412
+
+Æ2Æ 5
+scala/Int#2
+
+ÓÓ local26326
+
+íí &org/typelevel/paiges/Doc.tabulate(+1).2D
+
+®® 4org/typelevel/paiges/PaigesTest.EquivSyntax#`===`().2(
+
+ùù java/lang/Object#`==`().2'
+ org/typelevel/paiges/Doc.20
+
+¸¸  org/typelevel/paiges/Doc.text().2
+
+ÓÓ local1652
+ii local6620
+
+‰‰  org/typelevel/paiges/Doc#`/:`().2
+
+· · $local2412
+
+—+— ,local36024
+
+¸1¸ 5$org/typelevel/paiges/Doc.Union#bDoc.21
+
+˜˜ !org/scalatest/Assertions#succeed.2!
+
+ﬁ"ﬁ (java/lang/String#2
+
+◊5◊ 8local3652
+
+Ã
+Ã local2332+
+
+û!û #scala/runtime/RichInt#to().2
+yy local772/
+
+˛˛ org/typelevel/paiges/Doc#`+`().22
+
+ËË "org/scalatest/FunSuiteLike#test().2?
+
+Ü Ü (/scala/collection/immutable/Stream#mkString(+1).2
+
+÷÷ local3642(
+
+‰-‰ .scala/StringContext#s().2
+
+èè local2952
+
+ö\ö ]local1052)
+
+ªª org/typelevel/paiges/Doc#2A
+
+•• 1scala/collection/IndexedSeqOptimized#dropWhile().2)
+
+·· org/typelevel/paiges/Doc#2+
+
+/ 1scala/runtime/RichInt#to().2)
+
+“+“ 4scala/Option#getOrElse().2)
+
+„0„ 3org/typelevel/paiges/Doc.25
+
+Ø+Ø 6%org/typelevel/paiges/Doc.lineOrSpace.20
+
+˙˙  org/typelevel/paiges/Doc.Concat.2+
+
+ı4ı ;java/lang/String#isEmpty().2,
+
+ä@ä Cscala/runtime/RichInt#max().2
+\\ local532>
+
+¿¿ .org/typelevel/paiges/PaigesTest.EquivSyntax().2
+
+◊,◊ -local3642>
+
+øø .org/typelevel/paiges/PaigesTest.EquivSyntax().PZ D239171461FAEFF47DD0A3916ED0CAC9
